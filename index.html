@@ -8,11 +8,18 @@
 <meta name="theme-color" content="#06070c">
 <meta name="color-scheme" content="dark">
 <link rel="manifest" href="manifest.webmanifest">
-<!-- icons are loaded from GitHub so they work even when only index.html is hosted -->
-<link rel="icon" type="image/svg+xml" href="https://raw.githubusercontent.com/TurboNZL/tether/main/favicon.svg">
-<link rel="icon" type="image/png" sizes="32x32" href="https://raw.githubusercontent.com/TurboNZL/tether/main/icons/favicon-32.png">
-<link rel="icon" type="image/png" sizes="192x192" href="https://raw.githubusercontent.com/TurboNZL/tether/main/icons/icon-192.png">
-<link rel="apple-touch-icon" href="https://raw.githubusercontent.com/TurboNZL/tether/main/icons/apple-touch-icon.png">
+<link rel="icon" type="image/svg+xml" href="favicon.svg" data-gh>
+<link rel="icon" type="image/png" sizes="32x32" href="icons/favicon-32.png" data-gh>
+<link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png" data-gh>
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png" data-gh>
+<script>
+// Icons come from this site; if they are missing (e.g. only index.html was uploaded) fall back to GitHub.
+document.querySelectorAll('link[data-gh]').forEach(function (l) {
+  var i = new Image(), rel = l.getAttribute('href');
+  i.onerror = function () { l.href = 'https://raw.githubusercontent.com/TurboNZL/tether/main/' + rel; };
+  i.src = l.href;
+});
+</script>
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="Tether">
