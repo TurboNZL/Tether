@@ -686,7 +686,8 @@ public class WebSessionActivity extends Activity implements WebSession.Listener 
     @Override
     public void onMuted(boolean muted) {
         muteButton.setText(muted ? "Unmute" : "Mute");
-        tintPill(muteButton, Color.WHITE, muted ? 0.30f : 0.14f);
+        // Red while muted, so the state is obvious at a glance.
+        tintPill(muteButton, muted ? Ui.RED : Color.WHITE, muted ? 0.55f : 0.14f);
     }
 
     @Override

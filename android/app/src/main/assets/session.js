@@ -91,18 +91,74 @@
   }
 
   // ---- mute ----------------------------------------------------------------------------------
-  var muteTimer = null;
+  // The page flips the very same `enabled` switch on its tracks (its own mute button does), so a plain
+  // `track.enabled = false` can be undone by the page at any moment. Instead every outgoing audio track is
+  // locked: the page still reads and writes `enabled` as usual (and its own mute keeps working), but the
+  // real value underneath is always "what the page set AND NOT our mute", applied synchronously on every
+  // write. Every route a track can take to the call is hooked below, so none gets past the lock.
+  var enabledProp = Object.getOwnPropertyDescriptor(MediaStreamTrack.prototype, 'enabled');
+  var locked = [];
+  function lock(t, initialWant) {
+    if (!t || t.kind !== 'audio' || t.__tetherLocked || !enabledProp) return t;
+    var want = initialWant === undefined ? enabledProp.get.call(t) : !!initialWant;
+    Object.defineProperty(t, '__tetherLocked', { value: true, configurable: true });
+    Object.defineProperty(t, '__tetherApply', {
+      value: function () { enabledProp.set.call(t, want && !cfg.muted); }, configurable: true
+    });
+    Object.defineProperty(t, 'enabled', {
+      configurable: true,
+      get: function () { return want; },
+      set: function (v) { want = !!v; enabledProp.set.call(t, want && !cfg.muted); }
+    });
+    t.__tetherApply();
+    locked.push(t);
+    return t;
+  }
+  function unlock(t) { // a track that is not part of the call (a test), so never muted with it
+    if (!t || !t.__tetherLocked) return;
+    delete t.enabled; delete t.__tetherLocked; delete t.__tetherApply;
+    enabledProp.set.call(t, true);
+    locked = locked.filter(function (x) { return x !== t; });
+  }
+  function hook(proto, name, before) {
+    var o = proto && proto[name];
+    if (typeof o !== 'function') return;
+    proto[name] = function () {
+      try { before.apply(this, arguments); } catch (e) { /* never break the page */ }
+      return o.apply(this, arguments);
+    };
+  }
+  hook(window.RTCPeerConnection && RTCPeerConnection.prototype, 'addTrack', function (t) { lock(t); });
+  hook(window.RTCPeerConnection && RTCPeerConnection.prototype, 'addTransceiver', function (t) { if (t && typeof t !== 'string') lock(t); });
+  hook(window.RTCRtpSender && RTCRtpSender.prototype, 'replaceTrack', function (t) { lock(t); });
+  (function () {
+    var oc = MediaStreamTrack.prototype.clone;
+    MediaStreamTrack.prototype.clone = function () {
+      var c = oc.apply(this, arguments);
+      // A clone of a locked track is locked too, and starts with the page's own setting (not our mute).
+      try { if (this.__tetherLocked) lock(c, this.enabled); } catch (e) { /* ignore */ }
+      return c;
+    };
+  })();
+  var ackTick = 0;
+  function silent() { // is every audio track the call is sending really switched off underneath?
+    var senders = outgoing();
+    return { senders: senders.length, silent: senders.every(function (s) { return enabledProp.get.call(s.track) === false; }) };
+  }
   function applyMute() {
     tracks = tracks.filter(function (t) { return t.readyState !== 'ended'; });
-    tracks.forEach(function (t) { t.enabled = !cfg.muted; });
-    outgoing().forEach(function (s) { s.track.enabled = !cfg.muted; });
+    locked = locked.filter(function (t) { return t.readyState !== 'ended'; });
+    outgoing().forEach(function (s) { lock(s.track); }); // anything that reached a sender some other way
+    locked.forEach(function (t) { t.__tetherApply(); });
+    // While muted, keep confirming to the app that the mute is real (every 2 s).
+    if (cfg.muted && ++ackTick % 4 === 0) { var r = silent(); post('mute', { muted: true, senders: r.senders, silent: r.silent }); }
   }
+  setInterval(applyMute, 500);
   T.setMute = function (m) {
     cfg.muted = !!m;
     applyMute();
-    // The page may swap tracks behind our back; re-assert while muted.
-    if (cfg.muted && !muteTimer) muteTimer = setInterval(applyMute, 2000);
-    if (!cfg.muted && muteTimer) { clearInterval(muteTimer); muteTimer = null; }
+    var r = silent();
+    post('mute', { muted: cfg.muted, senders: r.senders, silent: cfg.muted ? r.silent : true });
   };
 
   // ---- microphone selection (getUserMedia wrapper) ----------------------------------------------
@@ -110,7 +166,7 @@
   var orig = md && md.getUserMedia ? md.getUserMedia.bind(md) : null;
 
   function adopt(stream) {
-    stream.getAudioTracks().forEach(function (t) { tracks.push(t); t.enabled = !cfg.muted; });
+    stream.getAudioTracks().forEach(function (t) { tracks.push(t); lock(t); });
   }
 
   // ---- virtual mic: audio captured natively from a chosen device, played into the page ----------------
@@ -334,8 +390,8 @@
       if (!orig) throw new Error('no microphone API');
       stream = await md.getUserMedia({ audio: true });
       var tr = stream.getAudioTracks()[0];
-      tracks = tracks.filter(function (x) { return x !== tr; }); // a test is never part of the call, so never muted with it
-      tr.enabled = true;
+      tracks = tracks.filter(function (x) { return x !== tr; });
+      unlock(tr); // a test is never part of the call, so never muted with it
       var c = ensureCtx(), chunks = [];
       src = c.createMediaStreamSource(stream);
       sp = c.createScriptProcessor(4096, 1, 1);

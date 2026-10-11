@@ -91,6 +91,18 @@ final class WebSession {
     private float micGain = 1f;       // 0..3: gain on what the other person hears
     private final VirtualMic vmic = new VirtualMic();
     private boolean pageWantsMic;     // the page currently holds the virtual microphone
+    private long lastMuteAck;         // when the page last confirmed the mute is real (wall clock)
+    private final Runnable muteCheck = new Runnable() {
+        @Override
+        public void run() {
+            // A mute the page never confirms is not a mute we can vouch for. Keep checking while muted.
+            if (!active || !muted) return;
+            if (System.currentTimeMillis() - lastMuteAck > 4500 && listener != null) {
+                listener.onNotice("MUTE NOT CONFIRMED - the page is not answering. Close the page if you must be sure.");
+            }
+            main.postDelayed(this, 3000);
+        }
+    };
     private boolean callMeter;
     private String script;            // assets/session.js, read once
     private long hangupAt;            // SystemClock.elapsedRealtime() deadline, 0 = no timer
@@ -134,7 +146,11 @@ final class WebSession {
      */
     void setMuted(boolean value) {
         muted = value;
+        vmic.setMuted(value);          // the native microphone path goes silent too, whatever the page does
         js("__tether.setMute(" + value + ")");
+        main.removeCallbacks(muteCheck);
+        lastMuteAck = System.currentTimeMillis(); // grace: the page answers within a moment
+        if (value) main.postDelayed(muteCheck, 3000);
         if (listener != null) listener.onMuted(value);
         WebSessionService.refresh();
     }
@@ -234,6 +250,7 @@ final class WebSession {
         if (device == null && listener != null) {
             listener.onNotice("The chosen microphone is not available now; using the system default input.");
         }
+        vmic.setMuted(muted);
         vmic.start(device, aec, new VirtualMic.Listener() {
             @Override
             public void onFrame(String base64Pcm) {
@@ -332,6 +349,8 @@ final class WebSession {
         main.removeCallbacks(tick);
         hangupAt = 0;
         muted = false;
+        vmic.setMuted(false);
+        main.removeCallbacks(muteCheck);
         pageWantsMic = false;
         stopCapture();
         if (webView != null) {
@@ -454,6 +473,16 @@ final class WebSession {
                     if (listener != null) {
                         listener.onLoopback(o.optString("state"), (float) o.optDouble("peak", 0),
                                 o.optString("verdict"), o.optString("message"));
+                    }
+                    break;
+                }
+                case "mute": {
+                    JSONObject o = new JSONObject(data);
+                    lastMuteAck = System.currentTimeMillis();
+                    if (muted && !o.optBoolean("silent", true)) {
+                        // The page says some outgoing audio is live although we are muted: say so, and lock it again.
+                        js("__tether.setMute(true)");
+                        if (listener != null) listener.onNotice("MUTE NOT CONFIRMED - re-applying it. Check the call.");
                     }
                     break;
                 }

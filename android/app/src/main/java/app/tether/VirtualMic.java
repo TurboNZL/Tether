@@ -35,6 +35,7 @@ final class VirtualMic {
 
     private final Handler main = new Handler(Looper.getMainLooper());
     private volatile boolean running;
+    private volatile boolean muted; // sends silence instead of the microphone, whatever the page does
     private volatile int generation; // bumped on every start/stop, so a finished thread never touches a newer capture
 
     boolean isRunning() {
@@ -51,6 +52,11 @@ final class VirtualMic {
     void stop() {
         generation++;
         running = false;
+    }
+
+    /** While muted the frames are digital silence: a second lock below the page's own track switch. */
+    void setMuted(boolean value) {
+        muted = value;
     }
 
     private void capture(int gen, AudioDeviceInfo device, boolean processing, Listener listener) {
@@ -84,6 +90,7 @@ final class VirtualMic {
                     fail(gen, listener, "the microphone stopped");
                     return;
                 }
+                if (muted) java.util.Arrays.fill(samples, 0, n, (short) 0);
                 ByteBuffer bytes = ByteBuffer.allocate(n * 2).order(ByteOrder.LITTLE_ENDIAN);
                 bytes.asShortBuffer().put(samples, 0, n);
                 final String frame = Base64.encodeToString(bytes.array(), Base64.NO_WRAP);
