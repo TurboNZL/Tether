@@ -49,9 +49,17 @@ audio as `USAGE_MEDIA`. The in-app diagnostics show `mode`, `a2dpOn` and the inc
     are captured natively (plain MIC source, optional platform echo cancellation / noise suppression) and played into the
     page as its microphone (`getUserMedia` wrapper in `assets/session.js`). "Automatic" leaves the page's own capture alone.
     The choice can be changed mid-call without renegotiating.
+  - **Mute is locked, not just switched**: a page can flip its own track's on/off switch at any time (its own mute
+    button does), so every outgoing audio track is locked: the page still reads and writes the switch as usual, but the real
+    value underneath is "what the page set AND NOT our mute", applied on every write. New calls, `replaceTrack`, clones,
+    `addTransceiver` and re-acquired microphones are all hooked; the native microphone path also sends silence while muted;
+    and the page confirms the mute is real every 2 s (the app warns if it cannot).
   - **Mute**, **call volume** (0-200% gain on the other person's voice, only routed when not 100%) and a live outgoing
     **level strip**; the Settings sheet also has a native **microphone level test** and brightness (the same volume and
     brightness values as the rest of the app).
+  - **Microphone volume** (0-300% gain on what the other person hears) and a **record and play back** test: it records a few
+    seconds through the same path the call captures (so it includes the gain), plays them back, and rates the level
+    (clipping / good / quiet / silent from the peak).
   - Leaving the app never pauses the page; the notification has Mute and Close page and tapping it returns to the page.
 - **Microphone test**: the Microphone card has a live level meter on the selected input, so you can see the mic works.
 

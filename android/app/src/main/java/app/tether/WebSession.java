@@ -63,6 +63,12 @@ final class WebSession {
 
         /** Something the user should know, e.g. the chosen microphone could not be opened. */
         void onNotice(String text);
+
+        /**
+         * Progress of the record-and-play-back test: state is "recording", "playing", "done" or "error";
+         * peak is 0..1 linear, verdict one of "clipping", "good", "quiet", "silent"; message is set on error.
+         */
+        void onLoopback(String state, float peak, String verdict, String message);
     }
 
     private static final WebSession INSTANCE = new WebSession();
@@ -82,8 +88,21 @@ final class WebSession {
     private String micKey = "";       // "" = the page's own capture; otherwise an input device, captured natively
     private boolean aec = true;
     private float zoom = 1f;          // 0.5..3: the page's layout width is 1280 / zoom
+    private float micGain = 1f;       // 0..3: gain on what the other person hears
     private final VirtualMic vmic = new VirtualMic();
     private boolean pageWantsMic;     // the page currently holds the virtual microphone
+    private long lastMuteAck;         // when the page last confirmed the mute is real (wall clock)
+    private final Runnable muteCheck = new Runnable() {
+        @Override
+        public void run() {
+            // A mute the page never confirms is not a mute we can vouch for. Keep checking while muted.
+            if (!active || !muted) return;
+            if (System.currentTimeMillis() - lastMuteAck > 4500 && listener != null) {
+                listener.onNotice("MUTE NOT CONFIRMED - the page is not answering. Close the page if you must be sure.");
+            }
+            main.postDelayed(this, 3000);
+        }
+    };
     private boolean callMeter;
     private String script;            // assets/session.js, read once
     private long hangupAt;            // SystemClock.elapsedRealtime() deadline, 0 = no timer
@@ -127,17 +146,36 @@ final class WebSession {
      */
     void setMuted(boolean value) {
         muted = value;
+        vmic.setMuted(value);          // the native microphone path goes silent too, whatever the page does
         js("__tether.setMute(" + value + ")");
+        main.removeCallbacks(muteCheck);
+        lastMuteAck = System.currentTimeMillis(); // grace: the page answers within a moment
+        if (value) main.postDelayed(muteCheck, 3000);
         if (listener != null) listener.onMuted(value);
         WebSessionService.refresh();
     }
 
     /** Settings picked before the page opens (they are re-applied to every page that loads). */
-    void configure(float volumeGain, String mic, boolean echoCancellation, float pageZoom) {
+    void configure(float volumeGain, String mic, boolean echoCancellation, float pageZoom, float micVolume) {
         volume = volumeGain;
         micKey = mic == null ? "" : mic;
         aec = echoCancellation;
         zoom = pageZoom;
+        micGain = micVolume;
+    }
+
+    /** Microphone volume, 0..3: gain on what the other person hears (above 1 boosts a quiet mic). */
+    void setMicGain(float gain) {
+        micGain = Math.max(0f, Math.min(3f, gain));
+        js(String.format(Locale.US, "__tether.setMicGain(%.3f)", micGain));
+    }
+
+    /**
+     * Records {@code seconds} the way the call captures (including the mic volume), plays it back through
+     * the page, and rates the level. Progress arrives in {@link Listener#onLoopback}.
+     */
+    void startLoopback(int seconds) {
+        js("__tether.loopback(" + seconds + ")");
     }
 
     /** Gain on the other person's voice, 0..2 (above 1 boosts it). */
@@ -212,6 +250,7 @@ final class WebSession {
         if (device == null && listener != null) {
             listener.onNotice("The chosen microphone is not available now; using the system default input.");
         }
+        vmic.setMuted(muted);
         vmic.start(device, aec, new VirtualMic.Listener() {
             @Override
             public void onFrame(String base64Pcm) {
@@ -310,6 +349,8 @@ final class WebSession {
         main.removeCallbacks(tick);
         hangupAt = 0;
         muted = false;
+        vmic.setMuted(false);
+        main.removeCallbacks(muteCheck);
         pageWantsMic = false;
         stopCapture();
         if (webView != null) {
@@ -404,7 +445,7 @@ final class WebSession {
         try {
             JSONObject settings = new JSONObject()
                     .put("muted", muted).put("volume", volume).put("aec", aec).put("zoom", zoom)
-                    .put("virtual", !micKey.isEmpty());
+                    .put("micGain", micGain).put("virtual", !micKey.isEmpty());
             return sessionScript() + "\nwindow.__tether.configure(" + settings + ");"
                     + (callMeter ? "\nwindow.__tether.setMeter(true);" : "");
         } catch (JSONException e) {
@@ -427,6 +468,24 @@ final class WebSession {
                 case "level":
                     if (listener != null) listener.onLevel(Float.parseFloat(data));
                     break;
+                case "loopback": {
+                    JSONObject o = new JSONObject(data);
+                    if (listener != null) {
+                        listener.onLoopback(o.optString("state"), (float) o.optDouble("peak", 0),
+                                o.optString("verdict"), o.optString("message"));
+                    }
+                    break;
+                }
+                case "mute": {
+                    JSONObject o = new JSONObject(data);
+                    lastMuteAck = System.currentTimeMillis();
+                    if (muted && !o.optBoolean("silent", true)) {
+                        // The page says some outgoing audio is live although we are muted: say so, and lock it again.
+                        js("__tether.setMute(true)");
+                        if (listener != null) listener.onNotice("MUTE NOT CONFIRMED - re-applying it. Check the call.");
+                    }
+                    break;
+                }
                 case "vmic":
                     pageWantsMic = "on".equals(data);
                     if (pageWantsMic) startCapture(); else stopCapture();

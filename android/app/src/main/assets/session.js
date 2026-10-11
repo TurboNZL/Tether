@@ -7,13 +7,15 @@
  *  - virtual mic:       audio captured natively from a chosen input device, played into the page as its microphone
  *  - mute:              switch the outgoing audio off and on without touching the page's own UI
  *  - volume:            0-200% gain on the other person's voice (only routed when it is not 100%)
+ *  - mic volume:        0-300% gain on what the other person hears
  *  - level meter:       the live outgoing level of the call
+ *  - playback test:     records a few seconds the way the call captures, plays them back, and rates the level
  */
 (function () {
   if (window.__tether) return;
   var T = window.__tether = {};
   var WIDTH = 1280;
-  var cfg = { muted: false, volume: 1, aec: true, zoom: 1 };
+  var cfg = { muted: false, volume: 1, aec: true, zoom: 1, micGain: 1 };
   var tracks = [], pcs = [];
 
   function post(type, data) {
@@ -55,7 +57,8 @@
   function ensureCtx() {
     if (!ctx) {
       var AC = window.AudioContext || window.webkitAudioContext;
-      ctx = new AC();
+      // 48 kHz so the natively captured frames need no resampling (and so no seams between them).
+      try { ctx = new AC({ sampleRate: 48000 }); } catch (e) { ctx = new AC(); }
       gain = ctx.createGain();
       gain.connect(ctx.destination);
     }
@@ -88,18 +91,74 @@
   }
 
   // ---- mute ----------------------------------------------------------------------------------
-  var muteTimer = null;
+  // The page flips the very same `enabled` switch on its tracks (its own mute button does), so a plain
+  // `track.enabled = false` can be undone by the page at any moment. Instead every outgoing audio track is
+  // locked: the page still reads and writes `enabled` as usual (and its own mute keeps working), but the
+  // real value underneath is always "what the page set AND NOT our mute", applied synchronously on every
+  // write. Every route a track can take to the call is hooked below, so none gets past the lock.
+  var enabledProp = Object.getOwnPropertyDescriptor(MediaStreamTrack.prototype, 'enabled');
+  var locked = [];
+  function lock(t, initialWant) {
+    if (!t || t.kind !== 'audio' || t.__tetherLocked || !enabledProp) return t;
+    var want = initialWant === undefined ? enabledProp.get.call(t) : !!initialWant;
+    Object.defineProperty(t, '__tetherLocked', { value: true, configurable: true });
+    Object.defineProperty(t, '__tetherApply', {
+      value: function () { enabledProp.set.call(t, want && !cfg.muted); }, configurable: true
+    });
+    Object.defineProperty(t, 'enabled', {
+      configurable: true,
+      get: function () { return want; },
+      set: function (v) { want = !!v; enabledProp.set.call(t, want && !cfg.muted); }
+    });
+    t.__tetherApply();
+    locked.push(t);
+    return t;
+  }
+  function unlock(t) { // a track that is not part of the call (a test), so never muted with it
+    if (!t || !t.__tetherLocked) return;
+    delete t.enabled; delete t.__tetherLocked; delete t.__tetherApply;
+    enabledProp.set.call(t, true);
+    locked = locked.filter(function (x) { return x !== t; });
+  }
+  function hook(proto, name, before) {
+    var o = proto && proto[name];
+    if (typeof o !== 'function') return;
+    proto[name] = function () {
+      try { before.apply(this, arguments); } catch (e) { /* never break the page */ }
+      return o.apply(this, arguments);
+    };
+  }
+  hook(window.RTCPeerConnection && RTCPeerConnection.prototype, 'addTrack', function (t) { lock(t); });
+  hook(window.RTCPeerConnection && RTCPeerConnection.prototype, 'addTransceiver', function (t) { if (t && typeof t !== 'string') lock(t); });
+  hook(window.RTCRtpSender && RTCRtpSender.prototype, 'replaceTrack', function (t) { lock(t); });
+  (function () {
+    var oc = MediaStreamTrack.prototype.clone;
+    MediaStreamTrack.prototype.clone = function () {
+      var c = oc.apply(this, arguments);
+      // A clone of a locked track is locked too, and starts with the page's own setting (not our mute).
+      try { if (this.__tetherLocked) lock(c, this.enabled); } catch (e) { /* ignore */ }
+      return c;
+    };
+  })();
+  var ackTick = 0;
+  function silent() { // is every audio track the call is sending really switched off underneath?
+    var senders = outgoing();
+    return { senders: senders.length, silent: senders.every(function (s) { return enabledProp.get.call(s.track) === false; }) };
+  }
   function applyMute() {
     tracks = tracks.filter(function (t) { return t.readyState !== 'ended'; });
-    tracks.forEach(function (t) { t.enabled = !cfg.muted; });
-    outgoing().forEach(function (s) { s.track.enabled = !cfg.muted; });
+    locked = locked.filter(function (t) { return t.readyState !== 'ended'; });
+    outgoing().forEach(function (s) { lock(s.track); }); // anything that reached a sender some other way
+    locked.forEach(function (t) { t.__tetherApply(); });
+    // While muted, keep confirming to the app that the mute is real (every 2 s).
+    if (cfg.muted && ++ackTick % 4 === 0) { var r = silent(); post('mute', { muted: true, senders: r.senders, silent: r.silent }); }
   }
+  setInterval(applyMute, 500);
   T.setMute = function (m) {
     cfg.muted = !!m;
     applyMute();
-    // The page may swap tracks behind our back; re-assert while muted.
-    if (cfg.muted && !muteTimer) muteTimer = setInterval(applyMute, 2000);
-    if (!cfg.muted && muteTimer) { clearInterval(muteTimer); muteTimer = null; }
+    var r = silent();
+    post('mute', { muted: cfg.muted, senders: r.senders, silent: cfg.muted ? r.silent : true });
   };
 
   // ---- microphone selection (getUserMedia wrapper) ----------------------------------------------
@@ -107,16 +166,21 @@
   var orig = md && md.getUserMedia ? md.getUserMedia.bind(md) : null;
 
   function adopt(stream) {
-    stream.getAudioTracks().forEach(function (t) { tracks.push(t); t.enabled = !cfg.muted; });
+    stream.getAudioTracks().forEach(function (t) { tracks.push(t); lock(t); });
   }
 
   // ---- virtual mic: audio captured natively from a chosen device, played into the page ----------------
   // The page cannot see the phone's individual inputs, so the app captures the chosen one itself and
   // pushes 16-bit PCM here; it is scheduled into a MediaStreamDestination that stands in for the mic.
-  var vm = { on: false, dest: null, next: 0, live: false, tracks: [] };
+  var vm = { on: false, dest: null, gain: null, nextFrame: 0, live: false, tracks: [] };
   function vmStream() {
     var c = ensureCtx();
-    if (!vm.dest) vm.dest = c.createMediaStreamDestination();
+    if (!vm.dest) {
+      vm.dest = c.createMediaStreamDestination();
+      vm.gain = c.createGain();
+      vm.gain.gain.value = cfg.micGain;
+      vm.gain.connect(vm.dest);
+    }
     var t = vm.dest.stream.getAudioTracks()[0].clone();
     vm.tracks.push(t);
     vmCheck();
@@ -139,13 +203,35 @@
     buf.copyToChannel(f, 0);
     var src = ctx.createBufferSource();
     src.buffer = buf;
-    src.connect(vm.dest);
-    var now = ctx.currentTime;
-    if (vm.next < now + 0.03) vm.next = now + 0.16;   // (re)start with a small cushion
-    else if (vm.next > now + 0.6) return;             // too far behind: drop this frame to stay close to live
-    src.start(vm.next);
-    vm.next += buf.duration;
+    src.connect(vm.gain);
+    // Schedule in whole samples, aimed at the middle of the sample: a fractional start time can round one
+    // sample early and overlap the previous frame, which is an audible click every 40 ms.
+    var sr = ctx.sampleRate, nowFrame = Math.round(ctx.currentTime * sr);
+    if (vm.nextFrame < nowFrame + 0.03 * sr) vm.nextFrame = nowFrame + Math.round(0.16 * sr);   // (re)start with a cushion
+    else if (vm.nextFrame > nowFrame + 0.6 * sr) return;       // too far behind: drop this frame to stay close to live
+    src.start((vm.nextFrame + 0.5) / sr);
+    vm.nextFrame += Math.round(n * sr / 48000);
   };
+
+  // Mic volume for the page's own capture: route it through a gain stage, but only when the gain is not
+  // 100% and only if the audio context is really running, so the call can never go silent because of it.
+  var pageGains = [];
+  function unity() { return Math.abs(cfg.micGain - 1) < 0.01; }
+  async function processed(raw) {
+    if (unity() || raw.getAudioTracks().length === 0) return raw;
+    var c = ensureCtx();
+    if (c.state !== 'running') { try { await c.resume(); } catch (e) { /* stays suspended */ } }
+    if (c.state !== 'running') return raw;
+    var src = c.createMediaStreamSource(raw), g = c.createGain(), dest = c.createMediaStreamDestination();
+    g.gain.value = cfg.micGain;
+    src.connect(g);
+    g.connect(dest);
+    pageGains.push(g);
+    var out = dest.stream, t = out.getAudioTracks()[0], stop = t.stop.bind(t);
+    t.stop = function () { stop(); raw.getTracks().forEach(function (r) { r.stop(); }); try { src.disconnect(); } catch (e) { /* gone */ } };
+    raw.getVideoTracks().forEach(function (v) { out.addTrack(v); });
+    return out;
+  }
 
   if (orig) {
     md.getUserMedia = async function (c) {
@@ -162,6 +248,7 @@
           c = Object.assign({}, c, { audio: audio });
         }
         stream = await orig(c);
+        if (c && c.audio) stream = await processed(stream);
       }
       adopt(stream);
       return stream;
@@ -185,6 +272,14 @@
     vm.on = !!on;
     vmCheck();
     await recapture();
+  };
+  T.setMicGain = async function (g) {
+    var wasUnity = unity();
+    cfg.micGain = Math.max(0, Math.min(3, +g || 0));
+    pageGains.forEach(function (n) { n.gain.value = cfg.micGain; });
+    if (vm.gain) vm.gain.gain.value = cfg.micGain;
+    // Moving to or from 100% switches the live page capture between the plain and the gain path.
+    if (!vm.on && wasUnity !== unity()) await recapture();
   };
   T.setProcessing = async function (on) {
     cfg.aec = !!on;
@@ -278,11 +373,63 @@
     });
   };
 
+  // ---- playback test: record the way the call captures (including the mic volume), play it back, rate it ----
+  var lb = null;
+  function rate(peak) {
+    var db = peak > 0 ? 20 * Math.log10(peak) : -120;
+    if (db >= -3) return 'clipping';
+    if (db >= -18) return 'good';
+    if (db >= -30) return 'quiet';
+    return 'silent';
+  }
+  T.loopback = async function (sec) {
+    if (lb) return;
+    lb = true;
+    var stream = null, sp = null, src = null, quiet = null;
+    try {
+      if (!orig) throw new Error('no microphone API');
+      stream = await md.getUserMedia({ audio: true });
+      var tr = stream.getAudioTracks()[0];
+      tracks = tracks.filter(function (x) { return x !== tr; });
+      unlock(tr); // a test is never part of the call, so never muted with it
+      var c = ensureCtx(), chunks = [];
+      src = c.createMediaStreamSource(stream);
+      sp = c.createScriptProcessor(4096, 1, 1);
+      quiet = c.createGain();
+      quiet.gain.value = 0;
+      src.connect(sp); sp.connect(quiet); quiet.connect(c.destination);
+      sp.onaudioprocess = function (e) { chunks.push(new Float32Array(e.inputBuffer.getChannelData(0))); };
+      post('loopback', { state: 'recording', sec: sec });
+      await new Promise(function (r) { setTimeout(r, sec * 1000); });
+      sp.onaudioprocess = null;
+      try { src.disconnect(); sp.disconnect(); quiet.disconnect(); } catch (e) { /* gone */ }
+      stream.getTracks().forEach(function (t) { t.stop(); });
+      var total = 0, peak = 0, sum = 0, i, j;
+      chunks.forEach(function (k) { total += k.length; });
+      var buf = c.createBuffer(1, Math.max(1, total), c.sampleRate), ch = buf.getChannelData(0), at = 0;
+      chunks.forEach(function (k) {
+        for (j = 0; j < k.length; j++) { var v = k[j]; ch[at++] = v; var a = Math.abs(v); if (a > peak) peak = a; sum += v * v; }
+      });
+      var rms = total ? Math.sqrt(sum / total) : 0, result = { peak: peak, rms: rms, verdict: rate(peak) };
+      var play = c.createBufferSource();
+      play.buffer = buf;
+      play.connect(c.destination);
+      play.onended = function () { lb = null; post('loopback', Object.assign({ state: 'done' }, result)); };
+      post('loopback', Object.assign({ state: 'playing' }, result));
+      play.start();
+    } catch (e) {
+      lb = null;
+      if (stream) stream.getTracks().forEach(function (t) { t.stop(); });
+      post('loopback', { state: 'error', message: (e && e.name ? e.name + ': ' : '') + (e && e.message || e) });
+    }
+  };
+
   // ---- misc ----------------------------------------------------------------------------------------
   T.configure = function (o) {
     if (!o) return;
     if ('aec' in o) cfg.aec = !!o.aec;
     if ('zoom' in o) T.setZoom(o.zoom);
+    if ('micGain' in o) { cfg.micGain = Math.max(0, Math.min(3, +o.micGain || 0)); if (vm.gain) vm.gain.gain.value = cfg.micGain; }
     if ('virtual' in o) { vm.on = !!o.virtual; vmCheck(); }
     if ('volume' in o) T.setVolume(o.volume);
     if ('muted' in o) T.setMute(o.muted);
@@ -297,6 +444,6 @@
     });
   };
   T.state = function () {
-    return { volume: cfg.volume, muted: cfg.muted, aec: cfg.aec, zoom: cfg.zoom, virtual: vm.on, routed: routed.length, ctx: ctx ? ctx.state : null, tracks: tracks.length };
+    return { volume: cfg.volume, muted: cfg.muted, aec: cfg.aec, zoom: cfg.zoom, micGain: cfg.micGain, virtual: vm.on, routed: routed.length, ctx: ctx ? ctx.state : null, tracks: tracks.length };
   };
 })();

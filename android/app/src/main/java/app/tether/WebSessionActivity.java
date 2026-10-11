@@ -52,6 +52,8 @@ public class WebSessionActivity extends Activity implements WebSession.Listener 
     private static final String PREF_WEB_MIC = "webMic";
     private static final String PREF_WEB_AEC = "webAec";
     private static final String PREF_WEB_ZOOM = "webZoom";
+    private static final String PREF_WEB_MIC_GAIN = "webMicGain";
+    private static final int LOOPBACK_SECONDS = 4;
 
     private FrameLayout holder;
     private TextView countdown;
@@ -71,6 +73,9 @@ public class WebSessionActivity extends Activity implements WebSession.Listener 
     private Runnable zoomApply;
     private long testStartedAt;
     private boolean heardSound;
+    private float micGain = 1f;
+    private TextView loopbackStatus;
+    private Runnable loopbackWatchdog;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -303,7 +308,36 @@ public class WebSessionActivity extends Activity implements WebSession.Listener 
             prefs().edit().putBoolean(PREF_WEB_AEC, on).apply();
             WebSession.get().setProcessing(on);
         });
-        col.addView(aec, lp(0, 0, 16));
+        col.addView(aec, lp(0, 0, 12));
+
+        // Microphone volume, and a playback test to hear how loud it is
+        micGain = prefs().getFloat(PREF_WEB_MIC_GAIN, 1f);
+        TextView gainValue = Ui.text(this, pct(micGain), 30f, Ui.TEXT_PRIMARY, "sans-serif");
+        col.addView(label("Microphone volume"));
+        col.addView(gainValue, lp(4, 0, 2));
+        GlassSlider gainSlider = new GlassSlider(this, 3f, 1f);
+        gainSlider.setValue(micGain);
+        gainSlider.setListener((value, fromUser) -> {
+            gainValue.setText(pct(value));
+            micGain = value;
+            if (!fromUser) return;
+            prefs().edit().putFloat(PREF_WEB_MIC_GAIN, value).apply();
+            WebSession.get().setMicGain(value);
+        });
+        col.addView(gainSlider, new LinearLayout.LayoutParams(-1, -2));
+        col.addView(Ui.text(this, "How loudly the other person hears you. Past 100% boosts a quiet mic; the bar "
+                + "above shows the result.", 13f, Ui.TEXT_TERTIARY, "sans-serif"), lp(0, 0, 10));
+        TextView playback = Ui.text(this, "Record " + LOOPBACK_SECONDS + " s and play it back", 15f,
+                Ui.TEXT_PRIMARY, "sans-serif-medium");
+        playback.setGravity(Gravity.CENTER);
+        playback.setPadding(0, Ui.dp(this, 12), 0, Ui.dp(this, 12));
+        tintPill(playback, Color.WHITE, 0.14f);
+        playback.setClickable(true);
+        playback.setOnClickListener(v -> startLoopback());
+        col.addView(playback, lp(0, 0, 6));
+        loopbackStatus = Ui.text(this, "Hear yourself the way the other person will.", 13f, Ui.TEXT_TERTIARY,
+                "sans-serif");
+        col.addView(loopbackStatus, lp(0, 0, 16));
 
         // Call volume
         float vol = prefs().getFloat(PREF_VOLUME, 1f);
@@ -383,6 +417,8 @@ public class WebSessionActivity extends Activity implements WebSession.Listener 
         }
         d.setOnDismissListener(x -> {
             micTester.stop();
+            if (loopbackWatchdog != null) ui.removeCallbacks(loopbackWatchdog);
+            loopbackStatus = null;
             sheet = null;
             sheetMeter = null;
             sheetStatus = null;
@@ -422,7 +458,8 @@ public class WebSessionActivity extends Activity implements WebSession.Listener 
             @Override
             public void onLevel(float rms) {
                 if (sheetMeter == null || sheetStatus == null) return;
-                sheetMeter.setRms(rms);
+                float heard = Math.min(1f, rms * micGain); // what the other person will hear
+                sheetMeter.setRms(heard);
                 if (rms > 0.01f) heardSound = true;
                 if (heardSound) {
                     sheetStatus.setText("Mic is working.");
@@ -438,6 +475,68 @@ public class WebSessionActivity extends Activity implements WebSession.Listener 
                 onMicTestError(message);
             }
         });
+    }
+
+    private void startLoopback() {
+        if (loopbackStatus == null) return;
+        if (!WebSession.get().isActive()) {
+            loopbackStatus.setText("Open the page first - the test records through it.");
+            loopbackStatus.setTextColor(Ui.AMBER);
+            return;
+        }
+        loopbackStatus.setText("Starting…");
+        loopbackStatus.setTextColor(Ui.TEXT_TERTIARY);
+        WebSession.get().startLoopback(LOOPBACK_SECONDS);
+        // The page may not be ready (still loading, or not a page that can record).
+        if (loopbackWatchdog != null) ui.removeCallbacks(loopbackWatchdog);
+        loopbackWatchdog = () -> {
+            if (loopbackStatus != null && "Starting…".contentEquals(loopbackStatus.getText())) {
+                loopbackStatus.setText("Could not start. Wait for the page to finish loading and try again.");
+                loopbackStatus.setTextColor(Ui.RED);
+            }
+        };
+        ui.postDelayed(loopbackWatchdog, 3000);
+    }
+
+    @Override
+    public void onLoopback(String state, float peak, String verdict, String message) {
+        if (loopbackStatus == null) return;
+        String level = peak > 0 ? String.format(Locale.US, " (peak %d dB)", Math.round(20.0 * Math.log10(peak))) : "";
+        switch (state) {
+            case "recording":
+                loopbackStatus.setText("Recording - speak normally…");
+                loopbackStatus.setTextColor(Ui.AMBER);
+                break;
+            case "playing":
+                loopbackStatus.setText("Playing it back…");
+                loopbackStatus.setTextColor(Ui.AMBER);
+                break;
+            case "done":
+                switch (verdict) {
+                    case "clipping":
+                        loopbackStatus.setText("Too loud" + level + " - it will distort. Turn the microphone volume down.");
+                        loopbackStatus.setTextColor(Ui.RED);
+                        break;
+                    case "good":
+                        loopbackStatus.setText("Good level" + level + ".");
+                        loopbackStatus.setTextColor(Ui.GREEN);
+                        break;
+                    case "quiet":
+                        loopbackStatus.setText("A bit quiet" + level + " - raise the microphone volume.");
+                        loopbackStatus.setTextColor(Ui.AMBER);
+                        break;
+                    default:
+                        loopbackStatus.setText("Almost silent" + level + " - check the microphone choice, mute and "
+                                + "the volume.");
+                        loopbackStatus.setTextColor(Ui.RED);
+                        break;
+                }
+                break;
+            default:
+                loopbackStatus.setText("Test failed: " + message);
+                loopbackStatus.setTextColor(Ui.RED);
+                break;
+        }
     }
 
     private void onMicTestError(String message) {
@@ -563,7 +662,8 @@ public class WebSessionActivity extends Activity implements WebSession.Listener 
     private void openPage() {
         WebSession session = WebSession.get();
         session.configure(prefs().getFloat(PREF_VOLUME, 1f), prefs().getString(PREF_WEB_MIC, ""),
-                prefs().getBoolean(PREF_WEB_AEC, true), prefs().getFloat(PREF_WEB_ZOOM, 1f));
+                prefs().getBoolean(PREF_WEB_AEC, true), prefs().getFloat(PREF_WEB_ZOOM, 1f),
+                prefs().getFloat(PREF_WEB_MIC_GAIN, 1f));
         showPage();
         session.open(this, pendingUrl);
         session.setCallMeter(true);
@@ -586,7 +686,8 @@ public class WebSessionActivity extends Activity implements WebSession.Listener 
     @Override
     public void onMuted(boolean muted) {
         muteButton.setText(muted ? "Unmute" : "Mute");
-        tintPill(muteButton, Color.WHITE, muted ? 0.30f : 0.14f);
+        // Red while muted, so the state is obvious at a glance.
+        tintPill(muteButton, muted ? Ui.RED : Color.WHITE, muted ? 0.55f : 0.14f);
     }
 
     @Override
