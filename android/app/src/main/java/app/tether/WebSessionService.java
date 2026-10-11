@@ -21,6 +21,7 @@ import android.os.PowerManager;
  */
 public class WebSessionService extends Service {
     static final String ACTION_CLOSE = "app.tether.CLOSE_PAGE";
+    static final String ACTION_TOGGLE_MUTE = "app.tether.TOGGLE_WEB_MUTE";
 
     private static final String CHANNEL_ID = "web";
     private static final int NOTIFICATION_ID = 2;
@@ -67,6 +68,8 @@ public class WebSessionService extends Service {
             return START_NOT_STICKY;
         }
 
+        if (ACTION_TOGGLE_MUTE.equals(action)) session.setMuted(!session.isMuted());
+
         NotificationManager nm = getSystemService(NotificationManager.class);
         nm.createNotificationChannel(
                 new NotificationChannel(CHANNEL_ID, "Web session", NotificationManager.IMPORTANCE_LOW));
@@ -82,10 +85,17 @@ public class WebSessionService extends Service {
     }
 
     private Notification buildNotification() {
-        long left = WebSession.get().getRemainingMs();
+        WebSession session = WebSession.get();
+        long left = session.getRemainingMs();
+        boolean muted = session.isMuted();
         Intent openIntent = new Intent(this, WebSessionActivity.class)
                 .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
         PendingIntent open = PendingIntent.getActivity(this, 0, openIntent, PendingIntent.FLAG_IMMUTABLE);
+        Notification.Action mute = new Notification.Action.Builder(
+                Icon.createWithResource(this, R.drawable.ic_stat_call), muted ? "Unmute" : "Mute",
+                PendingIntent.getService(this, 4,
+                        new Intent(this, WebSessionService.class).setAction(ACTION_TOGGLE_MUTE),
+                        PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT)).build();
         Notification.Action close = new Notification.Action.Builder(
                 Icon.createWithResource(this, R.drawable.ic_stat_call), "Close page",
                 PendingIntent.getService(this, 3,
@@ -93,12 +103,13 @@ public class WebSessionService extends Service {
                         PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT)).build();
         return new Notification.Builder(this, CHANNEL_ID)
                 .setSmallIcon(R.drawable.ic_stat_call)
-                .setContentTitle("Tether - web session")
+                .setContentTitle(muted ? "Tether - web session, mic muted" : "Tether - web session")
                 .setContentText(left >= 0 ? "Closes in " + WebSession.formatMinutes(left) : "Page open, no timer")
                 .setContentIntent(open)
                 .setOngoing(true)
                 .setOnlyAlertOnce(true)
                 .setCategory(Notification.CATEGORY_CALL)
+                .addAction(mute)
                 .addAction(close)
                 .build();
     }
