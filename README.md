@@ -39,13 +39,18 @@ audio as `USAGE_MEDIA`. The in-app diagnostics show `mode`, `a2dpOn` and the inc
 - **Web session**: opens a configurable https page in an embedded browser and keeps it running with the screen off or the
   app in the background (microphone foreground service plus wake/Wi-Fi locks). The address is a setting; nothing is
   hard-coded.
-  - **Desktop emulation**: desktop user agent and client hints, a 1280 px layout viewport (overriding the page's own
+  - **Desktop emulation**: desktop user agent and client hints, a desktop-width layout viewport (overriding the page's own
     `width=device-width`), and desktop `navigator` properties. "Show page info" in Settings prints what the page sees.
-  - **Hang up timer**: a delay or a clock time; ends the call on this end by closing the page.
-  - **Mic shim** (`assets/session.js`, injected at document start): wraps `getUserMedia` to prefer the phone's own mic over
-    a Bluetooth headset or use the one picked in Settings (switching the live call without renegotiating), tracks the
-    outgoing audio for **Mute**, applies echo cancellation on/off, and gives the other person's voice a 0-200% gain.
-  - **Settings sheet**: microphone and live level test, echo cancellation, call volume, brightness (the same volume and
+  - **Page zoom**: a slider that lays the page out again at `1280 / zoom` CSS pixels wide, like browser zoom (everything
+    reflows; nothing is just magnified).
+  - **Hang up timer**: a delay or a clock time; ends the call on this end by closing the page. The notification shows a live
+    countdown and the clock time it will hang up at.
+  - **Microphone**: a page only sees the system default input, so the phone's real inputs (the same list as the main screen)
+    are captured natively (plain MIC source, optional platform echo cancellation / noise suppression) and played into the
+    page as its microphone (`getUserMedia` wrapper in `assets/session.js`). "Automatic" leaves the page's own capture alone.
+    The choice can be changed mid-call without renegotiating.
+  - **Mute**, **call volume** (0-200% gain on the other person's voice, only routed when not 100%) and a live outgoing
+    **level strip**; the Settings sheet also has a native **microphone level test** and brightness (the same volume and
     brightness values as the rest of the app).
   - Leaving the app never pauses the page; the notification has Mute and Close page and tapping it returns to the page.
 - **Microphone test**: the Microphone card has a live level meter on the selected input, so you can see the mic works.

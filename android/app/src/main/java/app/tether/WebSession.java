@@ -3,6 +3,8 @@ package app.tether;
 import android.content.Context;
 import android.content.Intent;
 import android.content.MutableContextWrapper;
+import android.media.AudioDeviceInfo;
+import android.media.AudioManager;
 import android.net.Uri;
 import android.os.Handler;
 import android.os.Looper;
@@ -56,14 +58,11 @@ final class WebSession {
         /** Live level (0..1 RMS) of the call's outgoing audio. */
         void onLevel(float rms);
 
-        /** Level of the stand-alone mic test; -1 if the mic could not be opened. */
-        void onTestLevel(float rms);
-
-        /** The page's microphones and which one is in use. */
-        void onDevices(List<String> labels, String current);
-
         /** What the page sees of this browser (for checking the desktop emulation). */
         void onInfo(String text);
+
+        /** Something the user should know, e.g. the chosen microphone could not be opened. */
+        void onNotice(String text);
     }
 
     private static final WebSession INSTANCE = new WebSession();
@@ -80,8 +79,11 @@ final class WebSession {
     private String startHost = "";
     private boolean muted;
     private float volume = 1f;        // 0..2, applied to the other person's voice inside the page
-    private String micLabel = "";     // "" = automatic (the phone's own mic over a Bluetooth headset)
+    private String micKey = "";       // "" = the page's own capture; otherwise an input device, captured natively
     private boolean aec = true;
+    private float zoom = 1f;          // 0.5..3: the page's layout width is 1280 / zoom
+    private final VirtualMic vmic = new VirtualMic();
+    private boolean pageWantsMic;     // the page currently holds the virtual microphone
     private boolean callMeter;
     private String script;            // assets/session.js, read once
     private long hangupAt;            // SystemClock.elapsedRealtime() deadline, 0 = no timer
@@ -131,10 +133,11 @@ final class WebSession {
     }
 
     /** Settings picked before the page opens (they are re-applied to every page that loads). */
-    void configure(float volumeGain, String mic, boolean echoCancellation) {
+    void configure(float volumeGain, String mic, boolean echoCancellation, float pageZoom) {
         volume = volumeGain;
-        micLabel = mic == null ? "" : mic;
+        micKey = mic == null ? "" : mic;
         aec = echoCancellation;
+        zoom = pageZoom;
     }
 
     /** Gain on the other person's voice, 0..2 (above 1 boosts it). */
@@ -143,20 +146,35 @@ final class WebSession {
         js(String.format(Locale.US, "__tether.setVolume(%.3f)", volume));
     }
 
-    /** Pick a microphone by its label, or "" for automatic; switches the live call too. */
-    void setMic(String label) {
-        micLabel = label == null ? "" : label;
-        js("__tether.setMic(" + JSONObject.quote(micLabel) + ")");
+    /** Page zoom, 0.5..3: lays the page out again at 1280 / zoom CSS pixels wide (not a magnifier). */
+    void setZoom(float value) {
+        zoom = Math.max(0.5f, Math.min(3f, value));
+        js(String.format(Locale.US, "__tether.setZoom(%.3f)", zoom));
+    }
+
+    /**
+     * Choose the microphone: "" for the page's own capture, or a key from {@link #micKey(AudioDeviceInfo)}
+     * to capture that input natively and hand it to the page. Switches a live call without renegotiating.
+     */
+    void setMicChoice(String key) {
+        micKey = key == null ? "" : key;
+        js("__tether.setVirtualMic(" + !micKey.isEmpty() + ")");
+        if (micKey.isEmpty()) {
+            stopCapture();
+        } else if (pageWantsMic) {
+            stopCapture();
+            startCapture();
+        }
     }
 
     /** Echo cancellation and noise suppression on or off; switches the live capture. */
     void setProcessing(boolean on) {
         aec = on;
         js("__tether.setProcessing(" + on + ")");
-    }
-
-    void requestDevices() {
-        js("__tether.listMics()");
+        if (vmic.isRunning()) {
+            stopCapture();
+            startCapture();
+        }
     }
 
     /** Stream the call's outgoing level to {@link Listener#onLevel}. */
@@ -165,9 +183,50 @@ final class WebSession {
         js("__tether.setMeter(" + on + ")");
     }
 
-    /** A stand-alone mic test (works before or during a call); levels arrive in {@link Listener#onTestLevel}. */
-    void testMic(boolean on) {
-        js("__tether.testMic(" + on + ")");
+    // ---- native microphone -------------------------------------------------------------------
+
+    /** The phone's input devices, in the order the system lists them. */
+    static List<AudioDeviceInfo> inputs(Context context) {
+        AudioManager am = (AudioManager) context.getSystemService(Context.AUDIO_SERVICE);
+        List<AudioDeviceInfo> list = new ArrayList<>();
+        Collections.addAll(list, am.getDevices(AudioManager.GET_DEVICES_INPUTS));
+        return list;
+    }
+
+    /** A key that identifies an input across runs (device ids are not stable). */
+    static String micKey(AudioDeviceInfo d) {
+        return d.getType() + "|" + d.getProductName();
+    }
+
+    private AudioDeviceInfo findInput(String key) {
+        if (app == null) return null;
+        for (AudioDeviceInfo d : inputs(app)) {
+            if (micKey(d).equals(key)) return d;
+        }
+        return null;
+    }
+
+    private void startCapture() {
+        if (micKey.isEmpty() || vmic.isRunning() || !active) return;
+        AudioDeviceInfo device = findInput(micKey);
+        if (device == null && listener != null) {
+            listener.onNotice("The chosen microphone is not available now; using the system default input.");
+        }
+        vmic.start(device, aec, new VirtualMic.Listener() {
+            @Override
+            public void onFrame(String base64Pcm) {
+                js("__tether.pcm('" + base64Pcm + "')");
+            }
+
+            @Override
+            public void onError(String message) {
+                if (listener != null) listener.onNotice("Microphone: " + message);
+            }
+        });
+    }
+
+    private void stopCapture() {
+        vmic.stop();
     }
 
     void requestInfo() {
@@ -251,6 +310,8 @@ final class WebSession {
         main.removeCallbacks(tick);
         hangupAt = 0;
         muted = false;
+        pageWantsMic = false;
+        stopCapture();
         if (webView != null) {
             webView.loadUrl("about:blank");
             webView.clearHistory();
@@ -293,6 +354,8 @@ final class WebSession {
         wv.setWebViewClient(new WebViewClient() {
             @Override
             public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
+                pageWantsMic = false; // a new document starts without the virtual mic; it will ask again
+                stopCapture();
                 view.evaluateJavascript(pageScript(), null);
             }
 
@@ -340,7 +403,8 @@ final class WebSession {
     private String pageScript() {
         try {
             JSONObject settings = new JSONObject()
-                    .put("muted", muted).put("volume", volume).put("mic", micLabel).put("aec", aec);
+                    .put("muted", muted).put("volume", volume).put("aec", aec).put("zoom", zoom)
+                    .put("virtual", !micKey.isEmpty());
             return sessionScript() + "\nwindow.__tether.configure(" + settings + ");"
                     + (callMeter ? "\nwindow.__tether.setMeter(true);" : "");
         } catch (JSONException e) {
@@ -357,29 +421,24 @@ final class WebSession {
     }
 
     private void dispatch(String type, String data) {
-        if (listener == null || type == null || data == null) return;
+        if (type == null || data == null) return;
         try {
             switch (type) {
                 case "level":
-                    listener.onLevel(Float.parseFloat(data));
+                    if (listener != null) listener.onLevel(Float.parseFloat(data));
                     break;
-                case "testlevel":
-                    listener.onTestLevel(Float.parseFloat(data));
+                case "vmic":
+                    pageWantsMic = "on".equals(data);
+                    if (pageWantsMic) startCapture(); else stopCapture();
                     break;
-                case "devices": {
-                    JSONObject o = new JSONObject(data);
-                    JSONArray a = o.optJSONArray("list");
-                    List<String> labels = new ArrayList<>();
-                    for (int i = 0; a != null && i < a.length(); i++) labels.add(a.optString(i));
-                    listener.onDevices(labels, o.optString("current"));
-                    break;
-                }
                 case "info": {
                     JSONObject o = new JSONObject(data);
+                    if (listener == null) break;
                     listener.onInfo("user agent: " + o.optString("ua")
                             + "\nplatform: " + o.optString("platform")
                             + "\nlayout width: " + o.optInt("width") + " px (pixel ratio " + o.optString("dpr") + ")"
                             + "\nviewport: " + o.optString("viewport")
+                            + "\nmicrophone: " + (micKey.isEmpty() ? "page default" : "native input, " + micKey)
                             + "\nclient hint mobile: " + o.optString("uaMobile")
                             + "\npage: " + o.optString("host")
                             + "\nmic API: " + o.optString("mediaDevices")
