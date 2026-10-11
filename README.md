@@ -52,6 +52,9 @@ audio as `USAGE_MEDIA`. The in-app diagnostics show `mode`, `a2dpOn` and the inc
   - **Mute**, **call volume** (0-200% gain on the other person's voice, only routed when not 100%) and a live outgoing
     **level strip**; the Settings sheet also has a native **microphone level test** and brightness (the same volume and
     brightness values as the rest of the app).
+  - **Microphone volume** (0-300% gain on what the other person hears) and a **record and play back** test: it records a few
+    seconds through the same path the call captures (so it includes the gain), plays them back, and rates the level
+    (clipping / good / quiet / silent from the peak).
   - Leaving the app never pauses the page; the notification has Mute and Close page and tapping it returns to the page.
 - **Microphone test**: the Microphone card has a live level meter on the selected input, so you can see the mic works.
 

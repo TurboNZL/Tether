@@ -63,6 +63,12 @@ final class WebSession {
 
         /** Something the user should know, e.g. the chosen microphone could not be opened. */
         void onNotice(String text);
+
+        /**
+         * Progress of the record-and-play-back test: state is "recording", "playing", "done" or "error";
+         * peak is 0..1 linear, verdict one of "clipping", "good", "quiet", "silent"; message is set on error.
+         */
+        void onLoopback(String state, float peak, String verdict, String message);
     }
 
     private static final WebSession INSTANCE = new WebSession();
@@ -82,6 +88,7 @@ final class WebSession {
     private String micKey = "";       // "" = the page's own capture; otherwise an input device, captured natively
     private boolean aec = true;
     private float zoom = 1f;          // 0.5..3: the page's layout width is 1280 / zoom
+    private float micGain = 1f;       // 0..3: gain on what the other person hears
     private final VirtualMic vmic = new VirtualMic();
     private boolean pageWantsMic;     // the page currently holds the virtual microphone
     private boolean callMeter;
@@ -133,11 +140,26 @@ final class WebSession {
     }
 
     /** Settings picked before the page opens (they are re-applied to every page that loads). */
-    void configure(float volumeGain, String mic, boolean echoCancellation, float pageZoom) {
+    void configure(float volumeGain, String mic, boolean echoCancellation, float pageZoom, float micVolume) {
         volume = volumeGain;
         micKey = mic == null ? "" : mic;
         aec = echoCancellation;
         zoom = pageZoom;
+        micGain = micVolume;
+    }
+
+    /** Microphone volume, 0..3: gain on what the other person hears (above 1 boosts a quiet mic). */
+    void setMicGain(float gain) {
+        micGain = Math.max(0f, Math.min(3f, gain));
+        js(String.format(Locale.US, "__tether.setMicGain(%.3f)", micGain));
+    }
+
+    /**
+     * Records {@code seconds} the way the call captures (including the mic volume), plays it back through
+     * the page, and rates the level. Progress arrives in {@link Listener#onLoopback}.
+     */
+    void startLoopback(int seconds) {
+        js("__tether.loopback(" + seconds + ")");
     }
 
     /** Gain on the other person's voice, 0..2 (above 1 boosts it). */
@@ -404,7 +426,7 @@ final class WebSession {
         try {
             JSONObject settings = new JSONObject()
                     .put("muted", muted).put("volume", volume).put("aec", aec).put("zoom", zoom)
-                    .put("virtual", !micKey.isEmpty());
+                    .put("micGain", micGain).put("virtual", !micKey.isEmpty());
             return sessionScript() + "\nwindow.__tether.configure(" + settings + ");"
                     + (callMeter ? "\nwindow.__tether.setMeter(true);" : "");
         } catch (JSONException e) {
@@ -427,6 +449,14 @@ final class WebSession {
                 case "level":
                     if (listener != null) listener.onLevel(Float.parseFloat(data));
                     break;
+                case "loopback": {
+                    JSONObject o = new JSONObject(data);
+                    if (listener != null) {
+                        listener.onLoopback(o.optString("state"), (float) o.optDouble("peak", 0),
+                                o.optString("verdict"), o.optString("message"));
+                    }
+                    break;
+                }
                 case "vmic":
                     pageWantsMic = "on".equals(data);
                     if (pageWantsMic) startCapture(); else stopCapture();
