@@ -36,6 +36,11 @@ audio as `USAGE_MEDIA`. The in-app diagnostics show `mode`, `a2dpOn` and the inc
 - **UI**: dark Liquid Glass from plain Views: a drifting aurora scene behind frosted panels with an SDF edge lens
   (AGSL, Android 13+; blur only on 12, flat on older), a specular rim, gel-like press feedback and a glass-lens slider.
 
+- **Web session**: opens a configurable https page in an embedded browser (desktop layout) and keeps it running with the
+  screen off, using a microphone foreground service plus wake/Wi-Fi locks. A **hang up timer** (a delay, or a clock time)
+  ends the call on this end by closing the page. A small **mic selection shim** wraps `getUserMedia` so the phone's own
+  mic is preferred over a Bluetooth headset, like the web client does. The address is a setting; nothing is hard-coded.
+
 ### Build
 
 GitHub Actions (`.github/workflows/build-apk.yml`) builds a debug APK on every push to `android/**` and uploads it as
