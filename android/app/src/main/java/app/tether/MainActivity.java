@@ -37,6 +37,7 @@ import java.util.Locale;
 
 public class MainActivity extends Activity implements CallManager.Listener {
     private static final int REQUEST_PERMISSIONS = 1;
+    private static final int REQUEST_MIC_TEST = 3;
     private static final String PREFS = "tether";
     private static final String PREF_WEB_URL = "webUrl";
     private static final String PREF_VOLUME = "volume";
@@ -63,6 +64,12 @@ public class MainActivity extends Activity implements CallManager.Listener {
     private GlassButton endButton;
     private StatusPill statusPill;
     private TextView micValue;
+    private final MicTester micTester = new MicTester();
+    private TextView micTestButton;
+    private TextView micTestStatus;
+    private LevelMeterView micMeter;
+    private boolean micHeard;
+    private long micTestStarted;
     private LinearLayout micList;
     private GlyphView micChevron;
     private EditText webUrl;
@@ -103,6 +110,12 @@ public class MainActivity extends Activity implements CallManager.Listener {
     protected void onResume() {
         super.onResume();
         refreshKeepAlive();
+    }
+
+    @Override
+    protected void onPause() {
+        stopMicTest(); // the mic is not ours to hold while the screen is in the background
+        super.onPause();
     }
 
     @Override
@@ -231,6 +244,7 @@ public class MainActivity extends Activity implements CallManager.Listener {
         TextView hint = Ui.text(this, "Pick the phone's own mic so a Bluetooth headset never has to switch "
                 + "into its low quality call mode.", 13f, Ui.TEXT_TERTIARY, "sans-serif");
         body.addView(hint, lp(-1, -2, 0, 6, 0, 0));
+        buildMicTest(body);
 
         row.setOnClickListener(v -> {
             boolean open = micList.getVisibility() != View.VISIBLE;
@@ -238,6 +252,72 @@ public class MainActivity extends Activity implements CallManager.Listener {
             micChevron.animate().rotation(open ? 180f : 0f).setDuration(220).start();
         });
         content.addView(card, lp(-1, -2, 0, 10, 0, 0));
+    }
+
+    private void buildMicTest(LinearLayout body) {
+        micTestButton = Ui.text(this, "Test microphone", 16f, Ui.TEXT_PRIMARY, "sans-serif-medium");
+        micTestButton.setGravity(Gravity.CENTER);
+        micTestButton.setBackground(flatButton());
+        micTestButton.setClickable(true);
+        micTestButton.setPadding(0, Ui.dp(this, 13), 0, Ui.dp(this, 13));
+        micTestButton.setOnClickListener(v -> toggleMicTest());
+        body.addView(micTestButton, lp(-1, -2, 0, 12, 0, 0));
+        micMeter = new LevelMeterView(this);
+        micMeter.setVisibility(View.GONE);
+        body.addView(micMeter, lp(-1, Ui.dp(this, 14), 0, 10, 0, 0));
+        micTestStatus = Ui.text(this, "", 13f, Ui.TEXT_TERTIARY, "sans-serif");
+        micTestStatus.setVisibility(View.GONE);
+        body.addView(micTestStatus, lp(-1, -2, 0, 6, 0, 0));
+    }
+
+    private void toggleMicTest() {
+        if (micTester.isRunning()) {
+            stopMicTest();
+        } else if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, REQUEST_MIC_TEST);
+        } else {
+            startMicTest();
+        }
+    }
+
+    private void startMicTest() {
+        AudioDeviceInfo mic = selectedMic >= 0 && selectedMic < mics.size() ? mics.get(selectedMic) : null;
+        micHeard = false;
+        micTestStarted = System.currentTimeMillis();
+        micMeter.reset();
+        micMeter.setVisibility(View.VISIBLE);
+        micTestStatus.setVisibility(View.VISIBLE);
+        micTestStatus.setText("Speak - the bar should move.");
+        micTestStatus.setTextColor(Ui.TEXT_TERTIARY);
+        micTestButton.setText("Stop test");
+        micTester.start(mic, new MicTester.Listener() {
+            @Override
+            public void onLevel(float rms) {
+                micMeter.setRms(rms);
+                if (rms > 0.01f) micHeard = true;
+                if (micHeard) {
+                    micTestStatus.setText("Mic is working.");
+                    micTestStatus.setTextColor(Ui.GREEN);
+                } else if (System.currentTimeMillis() - micTestStarted > 4000) {
+                    micTestStatus.setText("No sound yet. Speak, or pick another microphone above.");
+                    micTestStatus.setTextColor(Ui.AMBER);
+                }
+            }
+
+            @Override
+            public void onError(String message) {
+                micTestButton.setText("Test microphone");
+                micMeter.reset();
+                micTestStatus.setText(message);
+                micTestStatus.setTextColor(Ui.RED);
+            }
+        });
+    }
+
+    private void stopMicTest() {
+        micTester.stop();
+        micTestButton.setText("Test microphone");
+        micMeter.reset();
     }
 
     private void buildVolumeCard() {
@@ -655,6 +735,10 @@ public class MainActivity extends Activity implements CallManager.Listener {
             row.setOnClickListener(v -> {
                 selectedMic = index;
                 renderMicList();
+                if (micTester.isRunning()) {
+                    stopMicTest();
+                    startMicTest();
+                }
             });
             micList.addView(row);
         }
@@ -737,6 +821,16 @@ public class MainActivity extends Activity implements CallManager.Listener {
 
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] results) {
+        if (requestCode == REQUEST_MIC_TEST) {
+            if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+                startMicTest();
+            } else {
+                micTestStatus.setVisibility(View.VISIBLE);
+                micTestStatus.setText("Microphone permission denied - allow it in Android settings > Apps > Tether");
+                micTestStatus.setTextColor(Ui.RED);
+            }
+            return;
+        }
         if (requestCode != REQUEST_PERMISSIONS || !pendingStart) return;
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
             beginCall();
@@ -748,6 +842,7 @@ public class MainActivity extends Activity implements CallManager.Listener {
 
     private void beginCall() {
         pendingStart = false;
+        stopMicTest();
         prefs().edit().putString(PREF_WEB_URL, webUrl.getText().toString().trim()).apply();
         AudioDeviceInfo mic = selectedMic >= 0 && selectedMic < mics.size() ? mics.get(selectedMic) : null;
         currentRoom = null;

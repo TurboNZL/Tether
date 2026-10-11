@@ -8,14 +8,29 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
 import android.webkit.CookieManager;
+import android.webkit.JavascriptInterface;
 import android.webkit.PermissionRequest;
 import android.webkit.WebChromeClient;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 
+import androidx.webkit.UserAgentMetadata;
+import androidx.webkit.WebSettingsCompat;
+import androidx.webkit.WebViewCompat;
+import androidx.webkit.WebViewFeature;
+
+import org.json.JSONArray;
+import org.json.JSONException;
+import org.json.JSONObject;
+
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
+import java.util.Locale;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -37,73 +52,19 @@ final class WebSession {
 
         /** Mute changed, possibly from the notification rather than the screen. */
         void onMuted(boolean muted);
-    }
 
-    /**
-     * Mic shim, injected into every page. It (1) wraps getUserMedia so that, unless the page asks for a
-     * specific device, the phone's own mic is chosen over a Bluetooth headset (the same rule the web page
-     * uses; labels are only exposed after a grant, so the first call takes and releases a throwaway
-     * stream), and (2) tracks the call's outgoing audio so {@code window.__setMute(true/false)} can switch
-     * it off and on without touching the page's own UI or ending the call.
-     */
-    private static final String MIC_SHIM = String.join("\n",
-            "(function () {",
-            "  if (window.__micShim) return;",
-            "  window.__micShim = true;",
-            "  var BT = /bluetooth|bt[\\s_-]|headset|buds|airpods|a2dp|hfp|sco/i;",
-            "  var md = navigator.mediaDevices, muted = false, tracks = [], pcs = [], timer = null;",
-            "  function apply() {",
-            "    tracks = tracks.filter(function (t) { return t.readyState !== 'ended'; });",
-            "    tracks.forEach(function (t) { t.enabled = !muted; });",
-            "    pcs = pcs.filter(function (p) { return p.connectionState !== 'closed'; });",
-            "    pcs.forEach(function (p) {",
-            "      p.getSenders().forEach(function (s) { if (s.track && s.track.kind === 'audio') s.track.enabled = !muted; });",
-            "    });",
-            "  }",
-            "  window.__setMute = function (m) {",
-            "    muted = !!m; apply();",
-            "    if (muted && !timer) timer = setInterval(apply, 2000);",
-            "    if (!muted && timer) { clearInterval(timer); timer = null; }",
-            "  };",
-            "  ['RTCPeerConnection', 'webkitRTCPeerConnection'].forEach(function (n) {",
-            "    var P = window[n];",
-            "    if (!P) return;",
-            "    window[n] = new Proxy(P, { construct: function (t, a, nt) {",
-            "      var pc = Reflect.construct(t, a, nt); pcs.push(pc); return pc;",
-            "    } });",
-            "  });",
-            "  if (!md || !md.getUserMedia) return;",
-            "  var orig = md.getUserMedia.bind(md);",
-            "  async function phoneMic() {",
-            "    var list = async function () {",
-            "      return (await md.enumerateDevices()).filter(function (d) {",
-            "        return d.kind === 'audioinput' && d.deviceId && d.deviceId !== 'default' && d.deviceId !== 'communications';",
-            "      });",
-            "    };",
-            "    var devs = await list();",
-            "    if (devs.length && !devs[0].label) {",
-            "      var tmp = await orig({ audio: true });",
-            "      tmp.getTracks().forEach(function (t) { t.stop(); });",
-            "      devs = await list();",
-            "    }",
-            "    return devs.find(function (d) { return d.label && !BT.test(d.label); });",
-            "  }",
-            "  md.getUserMedia = async function (c) {",
-            "    if (c && c.audio && !c.audio.deviceId) {",
-            "      try {",
-            "        var phone = await phoneMic();",
-            "        if (phone) {",
-            "          var audio = c.audio === true ? {} : Object.assign({}, c.audio);",
-            "          audio.deviceId = { exact: phone.deviceId };",
-            "          c = Object.assign({}, c, { audio: audio });",
-            "        }",
-            "      } catch (e) { /* fall back to the page's own request */ }",
-            "    }",
-            "    var stream = await orig(c);",
-            "    stream.getAudioTracks().forEach(function (t) { tracks.push(t); t.enabled = !muted; });",
-            "    return stream;",
-            "  };",
-            "})();");
+        /** Live level (0..1 RMS) of the call's outgoing audio. */
+        void onLevel(float rms);
+
+        /** Level of the stand-alone mic test; -1 if the mic could not be opened. */
+        void onTestLevel(float rms);
+
+        /** The page's microphones and which one is in use. */
+        void onDevices(List<String> labels, String current);
+
+        /** What the page sees of this browser (for checking the desktop emulation). */
+        void onInfo(String text);
+    }
 
     private static final WebSession INSTANCE = new WebSession();
 
@@ -118,6 +79,11 @@ final class WebSession {
     private boolean active;
     private String startHost = "";
     private boolean muted;
+    private float volume = 1f;        // 0..2, applied to the other person's voice inside the page
+    private String micLabel = "";     // "" = automatic (the phone's own mic over a Bluetooth headset)
+    private boolean aec = true;
+    private boolean callMeter;
+    private String script;            // assets/session.js, read once
     private long hangupAt;            // SystemClock.elapsedRealtime() deadline, 0 = no timer
     private long notifiedMinutes = -1;
 
@@ -159,9 +125,57 @@ final class WebSession {
      */
     void setMuted(boolean value) {
         muted = value;
-        if (webView != null) webView.evaluateJavascript("window.__setMute && window.__setMute(" + value + ")", null);
+        js("__tether.setMute(" + value + ")");
         if (listener != null) listener.onMuted(value);
         WebSessionService.refresh();
+    }
+
+    /** Settings picked before the page opens (they are re-applied to every page that loads). */
+    void configure(float volumeGain, String mic, boolean echoCancellation) {
+        volume = volumeGain;
+        micLabel = mic == null ? "" : mic;
+        aec = echoCancellation;
+    }
+
+    /** Gain on the other person's voice, 0..2 (above 1 boosts it). */
+    void setVolume(float gain) {
+        volume = Math.max(0f, Math.min(2f, gain));
+        js(String.format(Locale.US, "__tether.setVolume(%.3f)", volume));
+    }
+
+    /** Pick a microphone by its label, or "" for automatic; switches the live call too. */
+    void setMic(String label) {
+        micLabel = label == null ? "" : label;
+        js("__tether.setMic(" + JSONObject.quote(micLabel) + ")");
+    }
+
+    /** Echo cancellation and noise suppression on or off; switches the live capture. */
+    void setProcessing(boolean on) {
+        aec = on;
+        js("__tether.setProcessing(" + on + ")");
+    }
+
+    void requestDevices() {
+        js("__tether.listMics()");
+    }
+
+    /** Stream the call's outgoing level to {@link Listener#onLevel}. */
+    void setCallMeter(boolean on) {
+        callMeter = on;
+        js("__tether.setMeter(" + on + ")");
+    }
+
+    /** A stand-alone mic test (works before or during a call); levels arrive in {@link Listener#onTestLevel}. */
+    void testMic(boolean on) {
+        js("__tether.testMic(" + on + ")");
+    }
+
+    void requestInfo() {
+        js("__tether.info()");
+    }
+
+    private void js(String code) {
+        if (webView != null) webView.evaluateJavascript("window.__tether && " + code, null);
     }
 
     /** The shared WebView if it exists; never creates one. */
@@ -258,7 +272,9 @@ final class WebSession {
         st.setDomStorageEnabled(true);
         st.setMediaPlaybackRequiresUserGesture(false);
         // Ask for the desktop layout of the site, and let it be pinch-zoomed on a phone.
-        st.setUserAgentString(desktopUserAgent(st.getUserAgentString()));
+        String mobileUa = st.getUserAgentString();
+        st.setUserAgentString(desktopUserAgent(mobileUa));
+        applyDesktopClientHints(st, mobileUa);
         st.setUseWideViewPort(true);
         st.setLoadWithOverviewMode(true);
         st.setSupportZoom(true);
@@ -268,15 +284,21 @@ final class WebSession {
         cookies.setAcceptCookie(true);
         cookies.setAcceptThirdPartyCookies(wv, true);
 
+        wv.addJavascriptInterface(new Bridge(), "TetherBridge");
+        // Before any page script runs, where the browser supports it; the callbacks below cover the rest
+        // (the script is idempotent).
+        if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
+            WebViewCompat.addDocumentStartJavaScript(wv, sessionScript(), Collections.singleton("*"));
+        }
         wv.setWebViewClient(new WebViewClient() {
             @Override
             public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
-                view.evaluateJavascript(shimScript(), null);
+                view.evaluateJavascript(pageScript(), null);
             }
 
             @Override
             public void onPageFinished(WebView view, String url) {
-                view.evaluateJavascript(shimScript(), null);
+                view.evaluateJavascript(pageScript(), null);
             }
         });
         wv.setWebChromeClient(new WebChromeClient() {
@@ -299,9 +321,77 @@ final class WebSession {
         return wv;
     }
 
-    /** The shim, plus the current mute state so a freshly loaded page starts in the right state. */
-    private String shimScript() {
-        return MIC_SHIM + "\nwindow.__setMute(" + muted + ");";
+    /** assets/session.js: desktop emulation, mic selection, mute, volume and level meters. */
+    private String sessionScript() {
+        if (script == null) {
+            try (InputStream in = app.getAssets().open("session.js")) {
+                ByteArrayOutputStream out = new ByteArrayOutputStream();
+                byte[] buf = new byte[8192];
+                for (int n; (n = in.read(buf)) > 0; ) out.write(buf, 0, n);
+                script = out.toString("UTF-8");
+            } catch (IOException e) {
+                script = "";
+            }
+        }
+        return script;
+    }
+
+    /** The script plus the current settings, so a freshly loaded page starts in the right state. */
+    private String pageScript() {
+        try {
+            JSONObject settings = new JSONObject()
+                    .put("muted", muted).put("volume", volume).put("mic", micLabel).put("aec", aec);
+            return sessionScript() + "\nwindow.__tether.configure(" + settings + ");"
+                    + (callMeter ? "\nwindow.__tether.setMeter(true);" : "");
+        } catch (JSONException e) {
+            return sessionScript();
+        }
+    }
+
+    /** Messages from the page's script (levels, the mic list, page info); they arrive off the main thread. */
+    private final class Bridge {
+        @JavascriptInterface
+        public void post(final String type, final String data) {
+            main.post(() -> dispatch(type, data));
+        }
+    }
+
+    private void dispatch(String type, String data) {
+        if (listener == null || type == null || data == null) return;
+        try {
+            switch (type) {
+                case "level":
+                    listener.onLevel(Float.parseFloat(data));
+                    break;
+                case "testlevel":
+                    listener.onTestLevel(Float.parseFloat(data));
+                    break;
+                case "devices": {
+                    JSONObject o = new JSONObject(data);
+                    JSONArray a = o.optJSONArray("list");
+                    List<String> labels = new ArrayList<>();
+                    for (int i = 0; a != null && i < a.length(); i++) labels.add(a.optString(i));
+                    listener.onDevices(labels, o.optString("current"));
+                    break;
+                }
+                case "info": {
+                    JSONObject o = new JSONObject(data);
+                    listener.onInfo("user agent: " + o.optString("ua")
+                            + "\nplatform: " + o.optString("platform")
+                            + "\nlayout width: " + o.optInt("width") + " px (pixel ratio " + o.optString("dpr") + ")"
+                            + "\nviewport: " + o.optString("viewport")
+                            + "\nclient hint mobile: " + o.optString("uaMobile")
+                            + "\npage: " + o.optString("host")
+                            + "\nmic API: " + o.optString("mediaDevices")
+                            + "\ncalls open: " + o.optInt("calls"));
+                    break;
+                }
+                default:
+                    break;
+            }
+        } catch (JSONException | NumberFormatException ignored) {
+            // Malformed message from the page: ignore.
+        }
     }
 
     private boolean hostAllowed(Uri origin) {
@@ -323,5 +413,31 @@ final class WebSession {
         String major = m.find() ? m.group(1) : "120";
         return "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/"
                 + major + ".0.0.0 Safari/537.36";
+    }
+
+    /** Client hints say "desktop Linux Chrome" too, since some sites read them instead of the UA string. */
+    private static void applyDesktopClientHints(WebSettings st, String mobileUa) {
+        if (!WebViewFeature.isFeatureSupported(WebViewFeature.USER_AGENT_METADATA)) return;
+        Matcher m = Pattern.compile("Chrome/(\\d+)").matcher(mobileUa == null ? "" : mobileUa);
+        String major = m.find() ? m.group(1) : "120";
+        String full = major + ".0.0.0";
+        List<UserAgentMetadata.BrandVersion> brands = new ArrayList<>();
+        brands.add(new UserAgentMetadata.BrandVersion.Builder()
+                .setBrand("Chromium").setMajorVersion(major).setFullVersion(full).build());
+        brands.add(new UserAgentMetadata.BrandVersion.Builder()
+                .setBrand("Google Chrome").setMajorVersion(major).setFullVersion(full).build());
+        brands.add(new UserAgentMetadata.BrandVersion.Builder()
+                .setBrand("Not_A Brand").setMajorVersion("24").setFullVersion("24.0.0.0").build());
+        UserAgentMetadata md = new UserAgentMetadata.Builder()
+                .setBrandVersionList(brands)
+                .setFullVersion(full)
+                .setPlatform("Linux")
+                .setPlatformVersion("6.5.0")
+                .setArchitecture("x86")
+                .setBitness(64)
+                .setModel("")
+                .setMobile(false)
+                .build();
+        WebSettingsCompat.setUserAgentMetadata(st, md);
     }
 }

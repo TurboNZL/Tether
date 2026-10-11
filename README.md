@@ -36,12 +36,19 @@ audio as `USAGE_MEDIA`. The in-app diagnostics show `mode`, `a2dpOn` and the inc
 - **UI**: dark Liquid Glass from plain Views: a drifting aurora scene behind frosted panels with an SDF edge lens
   (AGSL, Android 13+; blur only on 12, flat on older), a specular rim, gel-like press feedback and a glass-lens slider.
 
-- **Web session**: opens a configurable https page in an embedded browser (desktop layout) and keeps it running with the
-  screen off, using a microphone foreground service plus wake/Wi-Fi locks. A **hang up timer** (a delay, or a clock time)
-  ends the call on this end by closing the page. A small **mic selection shim** wraps `getUserMedia` so the phone's own
-  mic is preferred over a Bluetooth headset, like the web client does, and tracks the outgoing audio so a **Mute** button
-  can switch it off and on. Leaving the app (home, another app, screen off) never pauses the page; the notification has
-  Mute and Close page, and tapping it returns to the page. The address is a setting; nothing is hard-coded.
+- **Web session**: opens a configurable https page in an embedded browser and keeps it running with the screen off or the
+  app in the background (microphone foreground service plus wake/Wi-Fi locks). The address is a setting; nothing is
+  hard-coded.
+  - **Desktop emulation**: desktop user agent and client hints, a 1280 px layout viewport (overriding the page's own
+    `width=device-width`), and desktop `navigator` properties. "Show page info" in Settings prints what the page sees.
+  - **Hang up timer**: a delay or a clock time; ends the call on this end by closing the page.
+  - **Mic shim** (`assets/session.js`, injected at document start): wraps `getUserMedia` to prefer the phone's own mic over
+    a Bluetooth headset or use the one picked in Settings (switching the live call without renegotiating), tracks the
+    outgoing audio for **Mute**, applies echo cancellation on/off, and gives the other person's voice a 0-200% gain.
+  - **Settings sheet**: microphone and live level test, echo cancellation, call volume, brightness (the same volume and
+    brightness values as the rest of the app).
+  - Leaving the app never pauses the page; the notification has Mute and Close page and tapping it returns to the page.
+- **Microphone test**: the Microphone card has a live level meter on the selected input, so you can see the mic works.
 
 ### Build
 
