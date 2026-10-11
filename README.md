@@ -58,8 +58,13 @@ audio as `USAGE_MEDIA`. The in-app diagnostics show `mode`, `a2dpOn` and the inc
     **level strip**; the Settings sheet also has a native **microphone level test** and brightness (the same volume and
     brightness values as the rest of the app).
   - **Microphone volume** (0-300% gain on what the other person hears) and a **record and play back** test: it records a few
-    seconds through the same path the call captures (so it includes the gain), plays them back, and rates the level
-    (clipping / good / quiet / silent from the peak).
+    seconds with the same settings the call uses (so it includes the gain), plays them back through the phone's media
+    volume, and rates the peak level (clipping / good / faint / silent). It works while the call is muted: with a chosen phone
+    input the app reads the microphone itself; with "Automatic" the page records it. After a faint or too-loud result, one tap
+    sets the microphone volume that would have put the peak near -6 dB.
+  - The mute check asks the page directly (page timers are slowed in the background, so the page does not volunteer
+    confirmations); it fixes a leak at once, and warns about an unanswering page only when a real page is loaded, after three
+    misses in a row, once per page load.
   - Leaving the app never pauses the page; the notification has Mute and Close page and tapping it returns to the page.
 - **Microphone test**: the Microphone card has a live level meter on the selected input, so you can see the mic works.
 

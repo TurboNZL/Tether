@@ -75,6 +75,11 @@ public class WebSessionActivity extends Activity implements WebSession.Listener 
     private boolean heardSound;
     private float micGain = 1f;
     private TextView loopbackStatus;
+    private TextView loopbackAction;
+    private TextView gainValue;
+    private GlassSlider gainSlider;
+    private float suggestedGain;
+    private final MicPreview micPreview = new MicPreview();
     private Runnable loopbackWatchdog;
 
     @Override
@@ -312,10 +317,10 @@ public class WebSessionActivity extends Activity implements WebSession.Listener 
 
         // Microphone volume, and a playback test to hear how loud it is
         micGain = prefs().getFloat(PREF_WEB_MIC_GAIN, 1f);
-        TextView gainValue = Ui.text(this, pct(micGain), 30f, Ui.TEXT_PRIMARY, "sans-serif");
+        gainValue = Ui.text(this, pct(micGain), 30f, Ui.TEXT_PRIMARY, "sans-serif");
         col.addView(label("Microphone volume"));
         col.addView(gainValue, lp(4, 0, 2));
-        GlassSlider gainSlider = new GlassSlider(this, 3f, 1f);
+        gainSlider = new GlassSlider(this, 3f, 1f);
         gainSlider.setValue(micGain);
         gainSlider.setListener((value, fromUser) -> {
             gainValue.setText(pct(value));
@@ -335,9 +340,18 @@ public class WebSessionActivity extends Activity implements WebSession.Listener 
         playback.setClickable(true);
         playback.setOnClickListener(v -> startLoopback());
         col.addView(playback, lp(0, 0, 6));
-        loopbackStatus = Ui.text(this, "Hear yourself the way the other person will.", 13f, Ui.TEXT_TERTIARY,
+        loopbackStatus = Ui.text(this, "Hear yourself the way the other person will. Works even while you are muted.", 13f, Ui.TEXT_TERTIARY,
                 "sans-serif");
-        col.addView(loopbackStatus, lp(0, 0, 16));
+        col.addView(loopbackStatus, lp(0, 0, 6));
+        // After a test that was faint or too loud: one tap to set the volume that would have been right.
+        loopbackAction = Ui.text(this, "", 15f, Ui.TEXT_PRIMARY, "sans-serif-medium");
+        loopbackAction.setGravity(Gravity.CENTER);
+        loopbackAction.setPadding(0, Ui.dp(this, 12), 0, Ui.dp(this, 12));
+        tintPill(loopbackAction, Ui.GREEN, 0.30f);
+        loopbackAction.setClickable(true);
+        loopbackAction.setVisibility(View.GONE);
+        loopbackAction.setOnClickListener(v -> applySuggestedGain());
+        col.addView(loopbackAction, lp(0, 0, 16));
 
         // Call volume
         float vol = prefs().getFloat(PREF_VOLUME, 1f);
@@ -418,7 +432,11 @@ public class WebSessionActivity extends Activity implements WebSession.Listener 
         d.setOnDismissListener(x -> {
             micTester.stop();
             if (loopbackWatchdog != null) ui.removeCallbacks(loopbackWatchdog);
+            micPreview.cancel();
             loopbackStatus = null;
+            loopbackAction = null;
+            gainValue = null;
+            gainSlider = null;
             sheet = null;
             sheetMeter = null;
             sheetStatus = null;
@@ -479,8 +497,26 @@ public class WebSessionActivity extends Activity implements WebSession.Listener 
 
     private void startLoopback() {
         if (loopbackStatus == null) return;
+        if (loopbackAction != null) loopbackAction.setVisibility(View.GONE);
+        // With a specific phone input chosen, the app reads that microphone itself, so the preview works
+        // whether or not the call is muted. With "Automatic" the call uses the page's own capture, so the
+        // page records it (it is never muted with the call either).
+        if (!prefs().getString(PREF_WEB_MIC, "").isEmpty()) {
+            if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                onMicTestError("microphone permission denied - allow it in Android settings > Apps > Tether");
+                return;
+            }
+            micPreview.cancel();
+            micTester.stop(); // one reader at a time keeps the level bar from fighting the preview
+            micPreview.start(chosenInput(), prefs().getBoolean(PREF_WEB_AEC, true), micGain, LOOPBACK_SECONDS,
+                    (state, peak, verdict, message) -> {
+                        onLoopback(state, peak, verdict, message);
+                        if (state.equals("done") || state.equals("error")) startMicTest(); // the level bar resumes
+                    });
+            return;
+        }
         if (!WebSession.get().isActive()) {
-            loopbackStatus.setText("Open the page first - the test records through it.");
+            loopbackStatus.setText("Open the page first - with Automatic the test records through it.");
             loopbackStatus.setTextColor(Ui.AMBER);
             return;
         }
@@ -508,7 +544,8 @@ public class WebSessionActivity extends Activity implements WebSession.Listener 
                 loopbackStatus.setTextColor(Ui.AMBER);
                 break;
             case "playing":
-                loopbackStatus.setText("Playing it back…");
+                loopbackStatus.setText("Playing it back" + level + " - it uses your phone's media volume, so press "
+                        + "the volume keys now if you hear nothing.");
                 loopbackStatus.setTextColor(Ui.AMBER);
                 break;
             case "done":
@@ -522,21 +559,50 @@ public class WebSessionActivity extends Activity implements WebSession.Listener 
                         loopbackStatus.setTextColor(Ui.GREEN);
                         break;
                     case "quiet":
-                        loopbackStatus.setText("A bit quiet" + level + " - raise the microphone volume.");
+                        loopbackStatus.setText("Faint" + level + " - the other person would hear you quietly. A phone's "
+                                + "raw mic is quieter than a normal call, which boosts it for you.");
                         loopbackStatus.setTextColor(Ui.AMBER);
                         break;
                     default:
-                        loopbackStatus.setText("Almost silent" + level + " - check the microphone choice, mute and "
-                                + "the volume.");
+                        loopbackStatus.setText("Almost silent" + level + " - check the microphone choice and the "
+                                + "microphone volume.");
                         loopbackStatus.setTextColor(Ui.RED);
                         break;
                 }
+                offerGainFix(peak, verdict);
                 break;
             default:
                 loopbackStatus.setText("Test failed: " + message);
                 loopbackStatus.setTextColor(Ui.RED);
                 break;
         }
+    }
+
+    /** If the test was faint or too loud, offer the microphone volume that would put the peak near -6 dB. */
+    private void offerGainFix(float peak, String verdict) {
+        if (loopbackAction == null) return;
+        loopbackAction.setVisibility(View.GONE);
+        boolean worthFixing = "quiet".equals(verdict) || "clipping".equals(verdict)
+                || ("silent".equals(verdict) && peak > 0.006f); // above about -44 dB there is something to scale up
+        if (!worthFixing || peak <= 0f) return;
+        float wanted = micGain * 0.5f / peak;               // the test already includes the current volume
+        suggestedGain = Math.max(0.1f, Math.min(3f, wanted));
+        if (Math.abs(suggestedGain - micGain) < 0.05f) return;
+        loopbackAction.setText(String.format(Locale.US, "Set microphone volume to %d%%%s",
+                Math.round(suggestedGain * 100f), wanted > 3f ? " (the most it can do)" : ""));
+        loopbackAction.setVisibility(View.VISIBLE);
+    }
+
+    private void applySuggestedGain() {
+        if (gainSlider == null || gainValue == null) return;
+        micGain = suggestedGain;
+        gainSlider.setValue(micGain);
+        gainValue.setText(pct(micGain));
+        prefs().edit().putFloat(PREF_WEB_MIC_GAIN, micGain).apply();
+        WebSession.get().setMicGain(micGain);
+        loopbackAction.setVisibility(View.GONE);
+        loopbackStatus.setText("Set to " + pct(micGain) + ". Run the test again to check it.");
+        loopbackStatus.setTextColor(Ui.TEXT_SECONDARY);
     }
 
     private void onMicTestError(String message) {

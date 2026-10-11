@@ -91,15 +91,14 @@ final class WebSession {
     private float micGain = 1f;       // 0..3: gain on what the other person hears
     private final VirtualMic vmic = new VirtualMic();
     private boolean pageWantsMic;     // the page currently holds the virtual microphone
-    private long lastMuteAck;         // when the page last confirmed the mute is real (wall clock)
+    private boolean pageLoaded;       // a real page has finished loading (not the blank page)
+    private int muteMisses;           // consecutive checks the page did not answer
+    private boolean muteWarned;       // one warning per page load, never a stream of them
     private final Runnable muteCheck = new Runnable() {
         @Override
         public void run() {
-            // A mute the page never confirms is not a mute we can vouch for. Keep checking while muted.
             if (!active || !muted) return;
-            if (System.currentTimeMillis() - lastMuteAck > 4500 && listener != null) {
-                listener.onNotice("MUTE NOT CONFIRMED - the page is not answering. Close the page if you must be sure.");
-            }
+            checkMute();
             main.postDelayed(this, 3000);
         }
     };
@@ -149,10 +148,49 @@ final class WebSession {
         vmic.setMuted(value);          // the native microphone path goes silent too, whatever the page does
         js("__tether.setMute(" + value + ")");
         main.removeCallbacks(muteCheck);
-        lastMuteAck = System.currentTimeMillis(); // grace: the page answers within a moment
-        if (value) main.postDelayed(muteCheck, 3000);
+        muteMisses = 0;
+        muteWarned = false;
+        if (value) {
+            checkMute();
+            main.postDelayed(muteCheck, 3000);
+        }
         if (listener != null) listener.onMuted(value);
         WebSessionService.refresh();
+    }
+
+    /**
+     * Asks the page whether the mute is real. The page answers straight away (this is not slowed down in the
+     * background like page timers are). A leak is fixed at once and reported; a page that cannot be asked is
+     * reported only if a real page is loaded, only after several misses in a row, and only once per page load.
+     */
+    private void checkMute() {
+        if (webView == null || !active || !muted) return;
+        webView.evaluateJavascript("window.__tether ? window.__tether.muteStatus() : null", value -> {
+            if (!active || !muted) return;
+            boolean answered = false;
+            boolean silent = true;
+            if (value != null && !value.equals("null")) {
+                try {
+                    silent = new JSONObject(value).optBoolean("silent", true);
+                    answered = true;
+                } catch (JSONException ignored) {
+                    // Treated as no answer.
+                }
+            }
+            if (answered) {
+                muteMisses = 0;
+                if (!silent) {
+                    js("__tether.setMute(true)"); // lock it again
+                    if (listener != null) listener.onNotice("MUTE LEAK FIXED - something tried to un-mute the call.");
+                }
+                return;
+            }
+            if (!pageLoaded) return; // no page, no call: nothing to vouch for
+            if (++muteMisses >= 3 && !muteWarned && listener != null) {
+                muteWarned = true;
+                listener.onNotice("MUTE NOT CONFIRMED - the page is not answering. Close the page if you must be sure.");
+            }
+        });
     }
 
     /** Settings picked before the page opens (they are re-applied to every page that loads). */
@@ -351,6 +389,7 @@ final class WebSession {
         muted = false;
         vmic.setMuted(false);
         main.removeCallbacks(muteCheck);
+        pageLoaded = false;
         pageWantsMic = false;
         stopCapture();
         if (webView != null) {
@@ -395,6 +434,9 @@ final class WebSession {
         wv.setWebViewClient(new WebViewClient() {
             @Override
             public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
+                pageLoaded = false;
+                muteMisses = 0;
+                muteWarned = false;
                 pageWantsMic = false; // a new document starts without the virtual mic; it will ask again
                 stopCapture();
                 view.evaluateJavascript(pageScript(), null);
@@ -402,6 +444,7 @@ final class WebSession {
 
             @Override
             public void onPageFinished(WebView view, String url) {
+                pageLoaded = !"about:blank".equals(url);
                 view.evaluateJavascript(pageScript(), null);
             }
         });
@@ -473,16 +516,6 @@ final class WebSession {
                     if (listener != null) {
                         listener.onLoopback(o.optString("state"), (float) o.optDouble("peak", 0),
                                 o.optString("verdict"), o.optString("message"));
-                    }
-                    break;
-                }
-                case "mute": {
-                    JSONObject o = new JSONObject(data);
-                    lastMuteAck = System.currentTimeMillis();
-                    if (muted && !o.optBoolean("silent", true)) {
-                        // The page says some outgoing audio is live although we are muted: say so, and lock it again.
-                        js("__tether.setMute(true)");
-                        if (listener != null) listener.onNotice("MUTE NOT CONFIRMED - re-applying it. Check the call.");
                     }
                     break;
                 }
