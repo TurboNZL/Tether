@@ -1,0 +1,557 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Tether</title>
+<meta name="description" content="A private audio line.">
+<meta name="theme-color" content="#06070c">
+<meta name="color-scheme" content="dark">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" type="image/png" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Tether">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<style>
+  :root {
+    --base: #06070c;
+    --text: rgba(255,255,255,.95);
+    --text-2: rgba(255,255,255,.66);
+    --text-3: rgba(255,255,255,.5);
+    --green: 52,211,153;
+    --red: 255,69,58;
+    --amber: 251,191,36;
+    --spring: cubic-bezier(.34,1.56,.64,1);
+    --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, system-ui, sans-serif;
+    --dim: 0;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html { background: var(--base); }
+  body {
+    margin: 0; min-height: 100vh; min-height: 100dvh;
+    color: var(--text); font: 400 16px/1.4 var(--font);
+    -webkit-font-smoothing: antialiased;
+    padding: calc(env(safe-area-inset-top) + 28px) 16px calc(env(safe-area-inset-bottom) + 120px);
+  }
+  main { max-width: 520px; margin: 0 auto; }
+
+  /* ---- scene: slow colour fields and a few orbs for the glass to bend ---- */
+  .scene { position: fixed; inset: 0; z-index: -1; overflow: hidden;
+    background: linear-gradient(180deg, #06070c, #0b0e18); }
+  .field, .orb { position: absolute; border-radius: 50%; will-change: transform; }
+  .field { width: 120vmax; height: 120vmax; animation: drift 70s ease-in-out infinite alternate; }
+  .f1 { left: -55vmax; top: -50vmax; background: radial-gradient(closest-side, rgba(75,91,255,.55), rgba(75,91,255,.2) 55%, transparent); }
+  .f2 { right: -70vmax; top: 10vmax; background: radial-gradient(closest-side, rgba(25,198,217,.32), rgba(25,198,217,.1) 55%, transparent); animation-duration: 85s; animation-delay: -20s; }
+  .f3 { left: -50vmax; bottom: -75vmax; background: radial-gradient(closest-side, rgba(162,75,255,.42), rgba(162,75,255,.14) 55%, transparent); animation-duration: 95s; animation-delay: -35s; }
+  .f4 { right: -75vmax; bottom: -80vmax; background: radial-gradient(closest-side, rgba(255,94,138,.22), transparent 70%); animation-duration: 80s; }
+  .orb { animation: float 38s ease-in-out infinite alternate; }
+  .o1 { width: 130px; height: 130px; right: 10%; top: 6%;  background: radial-gradient(closest-side, rgba(185,196,255,.6), rgba(185,196,255,.25) 55%, transparent); }
+  .o2 { width: 80px;  height: 80px;  left: 6%;  top: 30%;  background: radial-gradient(closest-side, rgba(125,240,255,.5), rgba(125,240,255,.2) 55%, transparent); animation-delay: -9s; }
+  .o3 { width: 170px; height: 170px; right: 18%; top: 52%; background: radial-gradient(closest-side, rgba(226,184,255,.55), rgba(226,184,255,.22) 55%, transparent); animation-delay: -17s; }
+  .o4 { width: 90px;  height: 90px;  left: 4%;  bottom: 18%; background: radial-gradient(closest-side, rgba(255,176,200,.45), rgba(255,176,200,.18) 55%, transparent); animation-delay: -25s; }
+  @keyframes drift { to { transform: translate3d(12vmax, 8vmax, 0) scale(1.08); } }
+  @keyframes float { to { transform: translate3d(-24px, 34px, 0); } }
+  .dim { position: fixed; inset: 0; z-index: 50; background: #000; pointer-events: none; opacity: var(--dim); }
+
+  /* ---- glass ---- */
+  .glass {
+    position: relative; border-radius: 30px;
+    background: linear-gradient(180deg, rgba(255,255,255,.15), rgba(255,255,255,.05) 55%, rgba(255,255,255,.1));
+    -webkit-backdrop-filter: blur(22px) saturate(1.5); backdrop-filter: blur(22px) saturate(1.5);
+    box-shadow: 0 10px 40px rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.22);
+  }
+  /* specular rim, lit at the top-left and bottom-right like light catching a bevel */
+  .glass::before {
+    content: ""; position: absolute; inset: 0; border-radius: inherit; padding: 1.2px; pointer-events: none;
+    background: linear-gradient(135deg, rgba(255,255,255,.8), rgba(255,255,255,.18) 22%, rgba(255,255,255,.05) 50%, rgba(255,255,255,.18) 78%, rgba(255,255,255,.5));
+    -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor; mask-composite: exclude;
+  }
+  .card { padding: 18px 20px 20px; margin-top: 14px; }
+  .card h2 { margin: 0 0 10px; font: 500 14px/1.2 var(--font); color: var(--text-2); }
+  .hint { margin: 10px 0 0; font-size: 13px; color: var(--text-3); }
+  .big { font: 400 34px/1.1 var(--font); letter-spacing: -.5px; margin-bottom: 6px; }
+
+  h1 { margin: 0; font: 600 38px/1.1 var(--font); letter-spacing: -.8px; }
+  .sub { margin: 8px 0 0; color: var(--text-2); font-size: 15px; }
+  .pill { display: inline-flex; align-items: center; gap: 9px; margin-top: 18px; padding: 9px 16px 9px 13px;
+    border-radius: 999px; font: 500 14px/1 var(--font); }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: rgba(255,255,255,.5); box-shadow: 0 0 0 4px rgba(255,255,255,.08); }
+  .pill.ok .dot   { background: rgb(var(--green)); box-shadow: 0 0 12px 2px rgba(var(--green),.7), 0 0 0 4px rgba(var(--green),.15); }
+  .pill.wait .dot { background: rgb(var(--amber)); box-shadow: 0 0 12px 2px rgba(var(--amber),.6); animation: pulse 1.1s ease-in-out infinite alternate; }
+  .pill.bad .dot  { background: rgb(var(--red)); box-shadow: 0 0 12px 2px rgba(var(--red),.6); }
+  @keyframes pulse { from { opacity: .35; } to { opacity: 1; } }
+
+  /* ---- controls ---- */
+  select, input[type=text] {
+    width: 100%; padding: 14px 16px; border-radius: 16px; color: var(--text); font: inherit; font-size: 16px;
+    background: rgba(0,0,0,.35); border: 1px solid rgba(255,255,255,.14); outline: none; appearance: none; -webkit-appearance: none;
+  }
+  select { background-image: linear-gradient(45deg, transparent 50%, rgba(255,255,255,.7) 50%), linear-gradient(135deg, rgba(255,255,255,.7) 50%, transparent 50%);
+    background-position: calc(100% - 22px) 52%, calc(100% - 16px) 52%; background-size: 6px 6px; background-repeat: no-repeat; padding-right: 40px; }
+  select option { background: #12141c; color: #fff; }
+  input::placeholder { color: var(--text-3); }
+  select:focus, input[type=text]:focus { border-color: rgba(120,150,255,.7); box-shadow: 0 0 0 3px rgba(91,140,255,.25); }
+  .row { display: flex; gap: 10px; }
+  .toggle { display: flex; align-items: center; gap: 12px; margin-top: 14px; color: var(--text-2); font-size: 15px; }
+  .toggle input { appearance: none; -webkit-appearance: none; width: 50px; height: 30px; border-radius: 999px; margin: 0; flex: none;
+    background: rgba(255,255,255,.16); position: relative; transition: background .25s; box-shadow: inset 0 0 0 1px rgba(255,255,255,.18); }
+  .toggle input::after { content: ""; position: absolute; top: 2px; left: 2px; width: 26px; height: 26px; border-radius: 50%;
+    background: #fff; box-shadow: 0 2px 6px rgba(0,0,0,.4); transition: transform .35s var(--spring); }
+  .toggle input:checked { background: rgba(var(--green),.75); }
+  .toggle input:checked::after { transform: translateX(20px); }
+
+  .btn {
+    --x: 50%; --y: 50%; position: relative; overflow: hidden; isolation: isolate; cursor: pointer;
+    display: inline-flex; align-items: center; justify-content: center; gap: 8px; width: 100%; min-height: 56px; padding: 0 18px;
+    border: 0; border-radius: 999px; color: var(--text); font: 500 16px/1 var(--font);
+    background: linear-gradient(180deg, rgba(255,255,255,.18), rgba(255,255,255,.06) 55%, rgba(255,255,255,.12)),
+      linear-gradient(rgba(var(--tint, 255,255,255), var(--tint-a, 0)), rgba(var(--tint, 255,255,255), var(--tint-a, 0))),
+      linear-gradient(rgba(10,12,22,.5), rgba(10,12,22,.5));
+    -webkit-backdrop-filter: blur(18px) saturate(1.5); backdrop-filter: blur(18px) saturate(1.5);
+    box-shadow: 0 8px 28px rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.3), inset 0 0 0 1px rgba(255,255,255,.12);
+    transition: transform .45s var(--spring), opacity .2s;
+  }
+  .btn::after { content: ""; position: absolute; inset: 0; z-index: -1; opacity: 0; transition: opacity .5s;
+    background: radial-gradient(circle at var(--x) var(--y), rgba(255,255,255,.34), transparent 65%); }
+  .btn:active { transform: scale(.95); transition: transform .12s ease-out; }
+  .btn:active::after { opacity: 1; transition: opacity .1s; }
+  .btn:disabled { opacity: .4; pointer-events: none; }
+  .btn.go  { --tint: var(--green); --tint-a: .34; }
+  .btn.end { --tint: var(--red);   --tint-a: .42; }
+  .btn.on  { --tint: 255,255,255;  --tint-a: .26; }
+  .btn.small { min-height: 48px; font-size: 15px; }
+  .btn svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+  .btn.flat { background: rgba(255,255,255,.12); box-shadow: inset 0 0 0 1px rgba(255,255,255,.2); margin-top: 12px; }
+
+  .dock { position: fixed; z-index: 10; left: 0; right: 0; bottom: 0; padding: 0 16px calc(env(safe-area-inset-bottom) + 14px);
+    display: flex; justify-content: center; pointer-events: none; }
+  .dock > div { width: 100%; max-width: 520px; display: flex; gap: 10px; pointer-events: auto; }
+  .dock .btn { min-height: 62px; }
+  .dock [hidden] { display: none; }
+  .dock .mute { flex: 1.25; } .dock .share, .dock .end { flex: 1; }
+  .materialise { animation: materialise .55s var(--spring) both; }
+  @keyframes materialise { from { opacity: 0; transform: scale(.88); filter: blur(6px); } to { opacity: 1; transform: none; filter: none; } }
+
+  /* ---- sliders: flat track, glass-lens thumb that swells while held ---- */
+  input[type=range] { -webkit-appearance: none; appearance: none; width: 100%; height: 44px; margin: 0; background: transparent; --pct: 50%; touch-action: pan-y; }
+  input[type=range]::-webkit-slider-runnable-track { height: 8px; border-radius: 99px;
+    background: linear-gradient(90deg, rgba(191,208,255,.6), rgba(255,255,255,.9)) 0 / var(--pct) 100% no-repeat, rgba(255,255,255,.18); }
+  input[type=range]::-moz-range-track { height: 8px; border-radius: 99px; background: rgba(255,255,255,.18); }
+  input[type=range]::-moz-range-progress { height: 8px; border-radius: 99px; background: linear-gradient(90deg, rgba(191,208,255,.6), rgba(255,255,255,.9)); }
+  input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 46px; height: 30px; margin-top: -11px; border-radius: 99px; border: 0;
+    background: linear-gradient(180deg, #fff, rgba(228,234,255,.9));
+    box-shadow: 0 4px 14px rgba(0,0,0,.4), inset 0 1px 0 #fff, inset 0 0 0 1px rgba(255,255,255,.6);
+    transition: transform .4s var(--spring); }
+  input[type=range]::-moz-range-thumb { width: 46px; height: 30px; border-radius: 99px; border: 0;
+    background: linear-gradient(180deg, rgba(255,255,255,.95), rgba(235,240,255,.7)); box-shadow: 0 4px 14px rgba(0,0,0,.4); }
+  input[type=range]:active::-webkit-slider-thumb { transform: scale(1.25); transition-duration: .14s; }
+
+  details summary { cursor: pointer; list-style: none; font: 500 14px/1.2 var(--font); color: var(--text-2); }
+  details summary::-webkit-details-marker { display: none; }
+  pre { margin: 12px 0 0; font: 11.5px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; word-break: break-all;
+    color: var(--text-2); max-height: 220px; overflow: auto; }
+  [hidden] { display: none !important; }
+  .code { font: 600 30px/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: 3px; margin-top: 12px; user-select: all; }
+
+  @media (prefers-reduced-motion: reduce) { .field, .orb, .pill.wait .dot { animation: none; } .materialise { animation: none; } }
+  @media (prefers-reduced-transparency: reduce) { .glass, .btn { -webkit-backdrop-filter: none; backdrop-filter: none; background-color: rgba(30,34,48,.92); } }
+</style>
+</head>
+<body>
+<div class="scene" aria-hidden="true">
+  <div class="field f1"></div><div class="field f2"></div><div class="field f3"></div><div class="field f4"></div>
+  <div class="orb o1"></div><div class="orb o2"></div><div class="orb o3"></div><div class="orb o4"></div>
+</div>
+<div class="dim" id="dim"></div>
+
+<main>
+  <h1>Tether</h1>
+  <p class="sub">A private audio line.</p>
+  <div class="pill glass" id="pill"><span class="dot"></span><span id="status">Not in a call</span></div>
+
+  <section class="card glass">
+    <h2>Microphone</h2>
+    <select id="mic" aria-label="Microphone"><option value="">Tap “Enable mics” first</option></select>
+    <button class="btn small flat" id="enable" type="button">Enable mics</button>
+    <label class="toggle"><input type="checkbox" id="aec" checked><span>Echo cancellation &amp; noise suppression</span></label>
+    <p class="hint" id="hint">Pick the phone's own mic so a Bluetooth headset never has to switch into its low quality call mode.</p>
+  </section>
+
+  <section class="card glass">
+    <h2>Call volume</h2>
+    <div class="big" id="volVal">100%</div>
+    <input type="range" id="vol" min="0" max="200" value="100" aria-label="Call volume">
+    <p class="hint">Only the other person's voice, separate from your device volume. Past 100% boosts it.</p>
+  </section>
+
+  <section class="card glass">
+    <h2>Brightness</h2>
+    <div class="big" id="brightVal">100%</div>
+    <input type="range" id="bright" min="0" max="100" value="100" aria-label="Brightness">
+    <p class="hint">Dims this app below your screen's minimum brightness.</p>
+  </section>
+
+  <section class="card glass">
+    <h2>Hang up timer</h2>
+    <select id="timer" aria-label="Hang up timer">
+      <option value="0">Off</option>
+      <option value="15">After 15 minutes</option>
+      <option value="30">After 30 minutes</option>
+      <option value="45">After 45 minutes</option>
+      <option value="60">After 1 hour</option>
+      <option value="90">After 1½ hours</option>
+      <option value="120">After 2 hours</option>
+      <option value="180">After 3 hours</option>
+      <option value="240">After 4 hours</option>
+      <option value="360">After 6 hours</option>
+      <option value="480">After 8 hours</option>
+    </select>
+    <p class="hint" id="timerHint"></p>
+  </section>
+
+  <section class="card glass" id="joinCard">
+    <h2>Join a call</h2>
+    <input type="text" id="code" placeholder="room code" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false" aria-label="Room code">
+    <button class="btn flat" id="go" type="button">Join</button>
+  </section>
+
+  <section class="card glass" id="share" hidden>
+    <h2>Invite</h2>
+    <div class="code" id="room"></div>
+    <input type="text" id="link" readonly style="margin-top:14px" aria-label="Invite link">
+    <p class="hint">Send the link to the other person, or Share it from the bar below.</p>
+  </section>
+
+  <section class="card glass">
+    <details>
+      <summary>Diagnostics</summary>
+      <pre id="log"></pre>
+    </details>
+  </section>
+
+  <audio id="remote" autoplay playsinline></audio>
+</main>
+
+<div class="dock"><div>
+  <button class="btn go" id="host" type="button">
+    <svg viewBox="0 0 24 24"><path d="M8 5.5v13l10.5-6.5z" fill="currentColor"/></svg>Start call</button>
+  <button class="btn mute" id="mute" type="button" hidden>
+    <svg viewBox="0 0 24 24" id="muteIcon"></svg><span id="muteLabel">Mute</span></button>
+  <button class="btn share" id="shareBtn" type="button" hidden>
+    <svg viewBox="0 0 24 24"><path d="M12 15V3.5M7.5 8 12 3.5 16.5 8M8 11H6.5Q5 11 5 12.5v6Q5 20 6.5 20h11q1.5 0 1.5-1.5v-6Q19 11 17.5 11H16"/></svg>Share</button>
+  <button class="btn end" id="hang" type="button" hidden>
+    <svg viewBox="0 0 24 24"><path d="M3 14.5Q3 12.6 5 11.6Q12 8.4 19 11.6Q21 12.6 21 14.5L21 15.2Q21 16.2 20 16.2L17.2 16.2Q16 16.2 16 15L16 14Q12 12.7 8 14L8 15Q8 16.2 6.8 16.2L4 16.2Q3 16.2 3 15.2Z" fill="currentColor"/></svg>End</button>
+</div></div>
+
+<script src="vendor/peerjs.min.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const PREFIX = 'tether-';
+const BT_RE = /bluetooth|bt[\s_-]|headset|buds|airpods|a2dp|hfp|sco/i;
+const ICON_MIC = '<path d="M12 2.8a3.5 3.5 0 0 1 3.5 3.5v5.4a3.5 3.5 0 0 1-7 0V6.3A3.5 3.5 0 0 1 12 2.8zM5.5 11.5Q5.5 17.5 12 17.5Q18.5 17.5 18.5 11.5M12 17.5V21M8.5 21h7"/>';
+const ICON_MIC_OFF = ICON_MIC + '<path d="M4 3.500 20 20.500"/>';
+let peer = null, call = null, stream = null, statsTimer = null, muted = false, wakeLock = null;
+let live = false, hangDeadline = 0, hangTimer = null;
+let actx = null, gain = null, remoteSource = null;
+
+const store = {
+  get(k, d) { try { const v = localStorage.getItem('tether.' + k); return v === null ? d : v; } catch { return d; } },
+  set(k, v) { try { localStorage.setItem('tether.' + k, v); } catch {} },
+};
+
+function log(msg) {
+  const t = new Date().toLocaleTimeString();
+  $('log').textContent = `[${t}] ${msg}\n` + $('log').textContent;
+}
+function setStatus(text, cls = '') { $('status').textContent = text; $('pill').className = 'pill glass ' + cls; }
+function fillRange(el) { el.style.setProperty('--pct', (100 * (el.value - el.min) / (el.max - el.min)) + '%'); }
+
+if (!navigator.mediaDevices) setStatus('Needs HTTPS (or localhost)', 'bad');
+
+// ---- Volume (Web Audio gain: works on iOS, where <audio>.volume is ignored, and can boost) ----
+function ensureAudio() {
+  // Must run inside a tap so iOS lets the audio context start.
+  if (!actx) {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (AC) { actx = new AC(); gain = actx.createGain(); gain.connect(actx.destination); applyVolume(); }
+  }
+  if (actx && actx.state === 'suspended') actx.resume();
+}
+function applyVolume() {
+  const v = $('vol').value / 100;
+  $('volVal').textContent = Math.round(v * 100) + '%';
+  fillRange($('vol'));
+  if (gain) gain.gain.value = v;
+  else $('remote').volume = Math.min(1, v);
+}
+$('vol').oninput = () => { applyVolume(); store.set('vol', $('vol').value); };
+$('vol').value = store.get('vol', 100); applyVolume();
+
+// ---- Brightness: a black veil over the whole app ----
+function applyBrightness() {
+  const b = $('bright').value / 100;
+  $('brightVal').textContent = Math.round(b * 100) + '%';
+  fillRange($('bright'));
+  document.documentElement.style.setProperty('--dim', ((1 - b) * 0.9).toFixed(3));
+}
+$('bright').oninput = () => { applyBrightness(); store.set('bright', $('bright').value); };
+$('bright').value = store.get('bright', 100); applyBrightness();
+
+// ---- Mic selection ----
+async function loadMics() {
+  // Labels are only exposed after a permission grant. Grab and immediately release a stream.
+  try {
+    const tmp = await navigator.mediaDevices.getUserMedia({ audio: true });
+    tmp.getTracks().forEach(t => t.stop());
+  } catch (e) { log('mic permission failed: ' + e.name); setStatus('Mic blocked', 'bad'); return; }
+
+  const devs2 = await navigator.mediaDevices.enumerateDevices();
+  const devs = devs2.filter(d => d.kind === 'audioinput');
+  const sel = $('mic');
+  sel.innerHTML = '';
+  devs.forEach((d, i) => {
+    const o = document.createElement('option');
+    o.value = d.deviceId;
+    o.textContent = d.label || `Microphone ${i + 1}`;
+    sel.appendChild(o);
+  });
+  const phone = devs.find(d => !BT_RE.test(d.label) && d.deviceId !== 'default' && d.deviceId !== 'communications');
+  if (phone) sel.value = phone.deviceId;
+  $('hint').textContent = phone
+    ? 'Auto-selected a non-Bluetooth mic. Verify the name is the phone mic.'
+    : 'Could not tell which mic is the phone mic; choose it manually.';
+  const outs = devs2.filter(d => d.kind === 'audiooutput');
+  log('outputs: ' + (outs.length ? outs.map(d => d.label || d.deviceId.slice(0, 6)).join(' | ') : 'none listed') +
+      ' | setSinkId: ' + ('setSinkId' in HTMLMediaElement.prototype ? 'yes' : 'NO (cannot choose output)'));
+  log('inputs: ' + devs.map(d => `${d.label || '?'} [${d.deviceId.slice(0, 6)}]`).join(' | '));
+}
+
+async function getMic() {
+  const id = $('mic').value;
+  const proc = $('aec').checked;
+  const audio = { echoCancellation: proc, noiseSuppression: proc, autoGainControl: proc };
+  if (id) audio.deviceId = { exact: id };
+  const s = await navigator.mediaDevices.getUserMedia({ audio });
+  const track = s.getAudioTracks()[0];
+  const st = track.getSettings();
+  track.enabled = !muted;
+  log(`capturing: "${track.label}" rate=${st.sampleRate || '?'} ec=${st.echoCancellation}`);
+  return s;
+}
+
+$('enable').onclick = loadMics;
+
+// Switching mics mid-call: swap the outgoing track without renegotiating.
+$('mic').onchange = async () => {
+  if (!call) return;
+  try {
+    const next = await getMic();
+    const sender = call.peerConnection.getSenders().find(s => s.track && s.track.kind === 'audio');
+    if (sender) await sender.replaceTrack(next.getAudioTracks()[0]);
+    stream && stream.getTracks().forEach(t => t.stop());
+    stream = next;
+  } catch (e) { log('mic switch failed: ' + e.message); }
+};
+
+// ---- Mute: only the outgoing track is disabled; the call and mic session stay up ----
+function renderMute() {
+  $('muteIcon').innerHTML = muted ? ICON_MIC_OFF : ICON_MIC;
+  $('muteLabel').textContent = muted ? 'Unmute' : 'Mute';
+  $('mute').classList.toggle('on', muted);
+  if (call) setStatus(muted ? 'Connected · mic muted' : 'Connected', muted ? 'wait' : 'ok');
+}
+$('mute').onclick = () => {
+  muted = !muted;
+  if (stream) stream.getAudioTracks().forEach(t => { t.enabled = !muted; });
+  log(muted ? 'mic muted (call stays connected)' : 'mic live');
+  renderMute();
+};
+
+// ---- Hang up timer: ends the call on this device only; the other person stays until they leave ----
+const TIMER_HELP = 'Ends the call on this device only, after the time you pick. The other person stays ' +
+  'connected until they leave. The countdown starts when the call connects.';
+function fmtLeft(ms) {
+  const s = Math.max(0, Math.ceil(ms / 1000)), p = n => String(n).padStart(2, '0');
+  const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60);
+  return h ? `${h}:${p(m)}:${p(s % 60)}` : `${m}:${p(s % 60)}`;
+}
+function renderTimer(left) {
+  $('timerHint').textContent = left > 0 ? `Hanging up in ${fmtLeft(left)}. Only your end hangs up.` : TIMER_HELP;
+}
+function armTimer() {
+  clearInterval(hangTimer); hangTimer = null; hangDeadline = 0;
+  const mins = +$('timer').value;
+  if (!mins || !live) { renderTimer(); return; }
+  hangDeadline = Date.now() + mins * 60000;
+  log(`will hang up in ${mins} min`);
+  hangTimer = setInterval(tickTimer, 1000);
+  tickTimer();
+}
+function tickTimer() {
+  // Compare against a wall-clock deadline: background tabs throttle intervals, so counting ticks would drift.
+  if (!hangDeadline) return;
+  const left = hangDeadline - Date.now();
+  if (left <= 0) { log('hang up timer reached'); hangup(); return; }
+  renderTimer(left);
+}
+$('timer').onchange = armTimer;
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') tickTimer(); });
+renderTimer();
+
+// ---- Keep the screen (and so the call) awake where the browser allows it ----
+async function holdAwake() {
+  try { if ('wakeLock' in navigator && !wakeLock) {
+    wakeLock = await navigator.wakeLock.request('screen');
+    wakeLock.addEventListener('release', () => { wakeLock = null; });
+  } } catch (e) { log('wake lock unavailable: ' + e.name); }
+}
+function releaseAwake() { if (wakeLock) { wakeLock.release().catch(() => {}); wakeLock = null; } }
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && (call || peer)) holdAwake(); });
+
+// ---- Dock state ----
+function showDock(inCall, canShare) {
+  const items = [['host', !inCall], ['mute', inCall], ['shareBtn', inCall && canShare], ['hang', inCall]];
+  items.forEach(([id, on]) => {
+    const el = $(id);
+    const was = !el.hidden;
+    el.hidden = !on;
+    if (on && !was) { el.classList.remove('materialise'); void el.offsetWidth; el.classList.add('materialise'); }
+  });
+  $('joinCard').hidden = inCall;
+}
+
+// ---- Call handling ----
+function attach(c) {
+  call = c;
+  c.on('stream', remote => {
+    const el = $('remote');
+    el.srcObject = remote;
+    if (actx && gain) {
+      // Route through the gain node; the element stays muted so the voice isn't played twice.
+      if (remoteSource) { try { remoteSource.disconnect(); } catch {} }
+      remoteSource = actx.createMediaStreamSource(remote);
+      remoteSource.connect(gain);
+      el.muted = true;
+    } else {
+      el.muted = false;
+    }
+    el.play().catch(() => log('tap the page to start audio'));
+    setStatus(muted ? 'Connected · mic muted' : 'Connected', muted ? 'wait' : 'ok');
+    startStats();
+    live = true;
+    if (!hangDeadline) armTimer();
+  });
+  c.on('close', hangup);
+  c.on('error', e => { log('call error: ' + e); hangup(); });
+}
+
+function newPeer(id) {
+  return new Promise((resolve, reject) => {
+    const p = id ? new Peer(id) : new Peer();
+    p.on('open', () => resolve(p));
+    p.on('error', e => { log('peer error: ' + e.type); setStatus('Error: ' + e.type, 'bad'); reject(e); });
+  });
+}
+
+async function startHost() {
+  ensureAudio(); // first, inside the tap: iOS only grants audio/mic to gesture-initiated calls
+  const micPromise = getMic();
+  try {
+    stream = await micPromise;
+    setStatus('Connecting…', 'wait');
+    showDock(true, true);
+    const room = Math.random().toString(36).slice(2, 8);
+    peer = await newPeer(PREFIX + room);
+    peer.on('call', c => { c.answer(stream); attach(c); });
+    const url = new URL(location.href);
+    url.search = '?join=' + room;
+    url.hash = '';
+    $('link').value = url.toString();
+    $('room').textContent = room;
+    $('share').hidden = false;
+    setStatus('Waiting for the other person…', 'wait');
+    holdAwake();
+  } catch (e) { log('host failed: ' + (e.message || e.type)); hangup(); }
+}
+
+async function startJoin(room) {
+  ensureAudio();
+  const micPromise = getMic();
+  try {
+    stream = await micPromise;
+    showDock(true, false);
+    peer = await newPeer();
+    setStatus('Calling…', 'wait');
+    attach(peer.call(PREFIX + room.trim(), stream));
+    holdAwake();
+  } catch (e) { log('join failed: ' + (e.message || e.type)); hangup(); }
+}
+
+function hangup() {
+  clearInterval(statsTimer);
+  live = false; $('timer').value = '0'; armTimer();
+  if (call) { try { call.close(); } catch {} call = null; }
+  if (peer) { peer.destroy(); peer = null; }
+  if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+  if (remoteSource) { try { remoteSource.disconnect(); } catch {} remoteSource = null; }
+  $('remote').srcObject = null;
+  $('share').hidden = true;
+  muted = false; renderMute();
+  releaseAwake();
+  showDock(false);
+  setStatus('Not in a call');
+}
+
+// Inbound audio stats help confirm the received stream is full-band (e.g. Opus), not narrowband.
+function startStats() {
+  let lastBytes = 0, lastTs = 0;
+  statsTimer = setInterval(async () => {
+    if (!call) return;
+    const report = await call.peerConnection.getStats();
+    report.forEach(r => {
+      if (r.type === 'inbound-rtp' && r.kind === 'audio') {
+        const kbps = lastTs ? Math.round(((r.bytesReceived - lastBytes) * 8) / (r.timestamp - lastTs)) : 0;
+        lastBytes = r.bytesReceived; lastTs = r.timestamp;
+        const codec = r.codecId && report.get(r.codecId);
+        log(`in: ${codec ? codec.mimeType : '?'} ${kbps} kbps jitter=${(r.jitter * 1000).toFixed(0)}ms lost=${r.packetsLost}`);
+      }
+    });
+  }, 5000);
+}
+
+$('host').onclick = startHost;
+$('go').onclick = () => { const v = $('code').value.trim(); if (v) startJoin(v.replace(/^.*join=/, '').replace(PREFIX, '')); };
+$('hang').onclick = hangup;
+$('shareBtn').onclick = async () => {
+  const url = $('link').value;
+  try {
+    if (navigator.share) await navigator.share({ title: 'Tether', url });
+    else { await navigator.clipboard.writeText(url); log('link copied'); }
+  } catch {}
+};
+
+// Light follows the finger on buttons.
+document.addEventListener('pointerdown', e => {
+  const b = e.target.closest('.btn');
+  if (!b) return;
+  const r = b.getBoundingClientRect();
+  b.style.setProperty('--x', (e.clientX - r.left) + 'px');
+  b.style.setProperty('--y', (e.clientY - r.top) + 'px');
+});
+
+renderMute();
+showDock(false);
+
+// Opening a ?join=room link pre-fills the join flow.
+const room = new URLSearchParams(location.search).get('join');
+if (room) { $('code').value = room; setStatus('Tap “Enable mics”, then Join'); }
+
+if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
+  navigator.serviceWorker.register('sw.js').catch(e => log('offline cache unavailable: ' + e.message));
+}
+</script>
+</body>
+</html>
