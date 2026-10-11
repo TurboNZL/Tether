@@ -140,7 +140,6 @@
       return c;
     };
   })();
-  var ackTick = 0;
   function silent() { // is every audio track the call is sending really switched off underneath?
     var senders = outgoing();
     return { senders: senders.length, silent: senders.every(function (s) { return enabledProp.get.call(s.track) === false; }) };
@@ -150,15 +149,18 @@
     locked = locked.filter(function (t) { return t.readyState !== 'ended'; });
     outgoing().forEach(function (s) { lock(s.track); }); // anything that reached a sender some other way
     locked.forEach(function (t) { t.__tetherApply(); });
-    // While muted, keep confirming to the app that the mute is real (every 2 s).
-    if (cfg.muted && ++ackTick % 4 === 0) { var r = silent(); post('mute', { muted: true, senders: r.senders, silent: r.silent }); }
   }
   setInterval(applyMute, 500);
   T.setMute = function (m) {
     cfg.muted = !!m;
     applyMute();
+  };
+  // The app asks (evaluateJavascript is not slowed down like page timers are in the background) and gets
+  // the real state back: are the tracks the call is sending really switched off underneath?
+  T.muteStatus = function () {
+    applyMute();
     var r = silent();
-    post('mute', { muted: cfg.muted, senders: r.senders, silent: cfg.muted ? r.silent : true });
+    return { muted: cfg.muted, senders: r.senders, silent: cfg.muted ? r.silent : true };
   };
 
   // ---- microphone selection (getUserMedia wrapper) ----------------------------------------------
@@ -378,8 +380,8 @@
   function rate(peak) {
     var db = peak > 0 ? 20 * Math.log10(peak) : -120;
     if (db >= -3) return 'clipping';
-    if (db >= -18) return 'good';
-    if (db >= -30) return 'quiet';
+    if (db >= -21) return 'good';
+    if (db >= -32) return 'quiet';
     return 'silent';
   }
   T.loopback = async function (sec) {
