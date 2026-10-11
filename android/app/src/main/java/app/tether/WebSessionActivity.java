@@ -36,6 +36,7 @@ public class WebSessionActivity extends Activity implements WebSession.Listener 
 
     private FrameLayout holder;
     private TextView countdown;
+    private TextView muteButton;
     private String pendingUrl;
 
     @Override
@@ -50,6 +51,7 @@ public class WebSessionActivity extends Activity implements WebSession.Listener 
         if (session.isActive()) {
             showPage();
             onTimer(session.getRemainingMs());
+            onMuted(session.isMuted());
             return;
         }
         pendingUrl = getIntent().getStringExtra(EXTRA_URL);
@@ -68,24 +70,42 @@ public class WebSessionActivity extends Activity implements WebSession.Listener 
     }
 
     @Override
+    protected void onPause() {
+        super.onPause();
+        keepPageRunning();
+    }
+
+    @Override
+    protected void onStop() {
+        super.onStop();
+        keepPageRunning();
+    }
+
+    /** Leaving the screen (home, another app, screen off) must never pause the page. */
+    private void keepPageRunning() {
+        WebView wv = WebSession.get().peekWebView();
+        if (wv != null && WebSession.get().isActive()) {
+            wv.onResume();
+            wv.resumeTimers();
+        }
+    }
+
+    @Override
     protected void onDestroy() {
         // The page and the timer outlive this screen; only the view of them goes away.
         WebSession session = WebSession.get();
         session.setListener(null);
-        WebView wv = session.webView(this);
-        if (wv.getParent() == holder) holder.removeView(wv);
+        WebView wv = session.peekWebView();
+        if (wv != null && wv.getParent() == holder) holder.removeView(wv);
         session.detach();
         super.onDestroy();
     }
 
     @Override
     public void onBackPressed() {
-        WebView wv = WebSession.get().webView(this);
-        if (wv.canGoBack()) {
-            wv.goBack();
-        } else {
-            moveTaskToBack(true); // keep the call running
-        }
+        // Never navigate the page back mid-call (that could unload it); just leave. The call keeps
+        // running and the notification brings you back.
+        moveTaskToBack(true);
     }
 
     // ---- UI --------------------------------------------------------------------------------
@@ -98,20 +118,30 @@ public class WebSessionActivity extends Activity implements WebSession.Listener 
         LinearLayout bar = new LinearLayout(this);
         bar.setOrientation(LinearLayout.HORIZONTAL);
         bar.setGravity(Gravity.CENTER_VERTICAL);
-        bar.setPadding(Ui.dp(this, 10), Ui.dp(this, 8), Ui.dp(this, 10), Ui.dp(this, 8));
+        bar.setPadding(Ui.dp(this, 10), Ui.dp(this, 8), Ui.dp(this, 10), Ui.dp(this, 2));
+        int gap = Ui.dp(this, 8);
 
         TextView close = pill("Close page", Ui.RED);
-        close.setOnClickListener(v -> WebSession.get().close("you closed the page"));
-        bar.addView(close, new LinearLayout.LayoutParams(-2, -2));
+        close.setOnClickListener(v -> confirmClose());
+        bar.addView(close, new LinearLayout.LayoutParams(0, -2, 1f));
 
-        countdown = Ui.text(this, "No timer", 14f, Ui.TEXT_SECONDARY, "sans-serif-medium");
-        countdown.setGravity(Gravity.CENTER);
-        bar.addView(countdown, new LinearLayout.LayoutParams(0, -2, 1f));
+        muteButton = pill("Mute", Color.WHITE);
+        muteButton.setOnClickListener(v -> WebSession.get().setMuted(!WebSession.get().isMuted()));
+        LinearLayout.LayoutParams ml = new LinearLayout.LayoutParams(0, -2, 1f);
+        ml.leftMargin = gap;
+        bar.addView(muteButton, ml);
 
         TextView timer = pill("Timer", Color.WHITE);
         timer.setOnClickListener(v -> showTimerDialog());
-        bar.addView(timer, new LinearLayout.LayoutParams(-2, -2));
+        LinearLayout.LayoutParams tl = new LinearLayout.LayoutParams(0, -2, 1f);
+        tl.leftMargin = gap;
+        bar.addView(timer, tl);
         root.addView(bar, new LinearLayout.LayoutParams(-1, -2));
+
+        countdown = Ui.text(this, "No timer", 13f, Ui.TEXT_SECONDARY, "sans-serif-medium");
+        countdown.setGravity(Gravity.CENTER);
+        countdown.setPadding(0, Ui.dp(this, 2), 0, Ui.dp(this, 6));
+        root.addView(countdown, new LinearLayout.LayoutParams(-1, -2));
 
         holder = new FrameLayout(this);
         root.addView(holder, new LinearLayout.LayoutParams(-1, 0, 1f));
@@ -121,14 +151,28 @@ public class WebSessionActivity extends Activity implements WebSession.Listener 
     private TextView pill(String label, int tint) {
         TextView t = Ui.text(this, label, 14f, Ui.TEXT_PRIMARY, "sans-serif-medium");
         t.setGravity(Gravity.CENTER);
-        t.setPadding(Ui.dp(this, 16), Ui.dp(this, 10), Ui.dp(this, 16), Ui.dp(this, 10));
+        t.setPadding(Ui.dp(this, 8), Ui.dp(this, 11), Ui.dp(this, 8), Ui.dp(this, 11));
+        t.setClickable(true);
+        tintPill(t, tint, tint == Color.WHITE ? 0.14f : 0.35f);
+        return t;
+    }
+
+    private void tintPill(TextView t, int tint, float alpha) {
         GradientDrawable bg = new GradientDrawable();
-        bg.setColor(Ui.withAlpha(tint, tint == Color.WHITE ? 0.14f : 0.35f));
+        bg.setColor(Ui.withAlpha(tint, alpha));
         bg.setCornerRadius(Ui.dpf(this, 100f));
         bg.setStroke(Ui.dp(this, 1), 0x33FFFFFF);
         t.setBackground(bg);
-        t.setClickable(true);
-        return t;
+    }
+
+    /** Ending the call is one tap away from the page, so ask first. */
+    private void confirmClose() {
+        new AlertDialog.Builder(this)
+                .setTitle("Close the page?")
+                .setMessage("This ends the call on your end.")
+                .setPositiveButton("Close page", (d, w) -> WebSession.get().close("you closed the page"))
+                .setNegativeButton("Keep it open", null)
+                .show();
     }
 
     private void showPage() {
@@ -228,6 +272,12 @@ public class WebSessionActivity extends Activity implements WebSession.Listener 
         countdown.setText(s >= 3600
                 ? String.format(Locale.US, "Closes in %d:%02d:%02d", s / 3600, s % 3600 / 60, s % 60)
                 : String.format(Locale.US, "Closes in %d:%02d", s / 60, s % 60));
+    }
+
+    @Override
+    public void onMuted(boolean muted) {
+        muteButton.setText(muted ? "Unmute" : "Mute");
+        tintPill(muteButton, Color.WHITE, muted ? 0.30f : 0.14f);
     }
 
     @Override

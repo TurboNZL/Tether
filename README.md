@@ -39,7 +39,9 @@ audio as `USAGE_MEDIA`. The in-app diagnostics show `mode`, `a2dpOn` and the inc
 - **Web session**: opens a configurable https page in an embedded browser (desktop layout) and keeps it running with the
   screen off, using a microphone foreground service plus wake/Wi-Fi locks. A **hang up timer** (a delay, or a clock time)
   ends the call on this end by closing the page. A small **mic selection shim** wraps `getUserMedia` so the phone's own
-  mic is preferred over a Bluetooth headset, like the web client does. The address is a setting; nothing is hard-coded.
+  mic is preferred over a Bluetooth headset, like the web client does, and tracks the outgoing audio so a **Mute** button
+  can switch it off and on. Leaving the app (home, another app, screen off) never pauses the page; the notification has
+  Mute and Close page, and tapping it returns to the page. The address is a setting; nothing is hard-coded.
 
 ### Build
 

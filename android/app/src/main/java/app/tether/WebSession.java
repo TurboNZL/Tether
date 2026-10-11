@@ -34,19 +34,46 @@ final class WebSession {
 
         /** The page was closed, by the timer, the Close button or the notification. */
         void onClosed(String reason);
+
+        /** Mute changed, possibly from the notification rather than the screen. */
+        void onMuted(boolean muted);
     }
 
     /**
-     * Mic selection shim: wraps getUserMedia so that, unless the page asks for a specific device, the
-     * phone's own mic is chosen over a Bluetooth headset (the same rule the web page uses). Labels are
-     * only exposed after a permission grant, so the first call takes and releases a throwaway stream.
+     * Mic shim, injected into every page. It (1) wraps getUserMedia so that, unless the page asks for a
+     * specific device, the phone's own mic is chosen over a Bluetooth headset (the same rule the web page
+     * uses; labels are only exposed after a grant, so the first call takes and releases a throwaway
+     * stream), and (2) tracks the call's outgoing audio so {@code window.__setMute(true/false)} can switch
+     * it off and on without touching the page's own UI or ending the call.
      */
     private static final String MIC_SHIM = String.join("\n",
             "(function () {",
-            "  if (window.__micShim || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return;",
+            "  if (window.__micShim) return;",
             "  window.__micShim = true;",
             "  var BT = /bluetooth|bt[\\s_-]|headset|buds|airpods|a2dp|hfp|sco/i;",
-            "  var md = navigator.mediaDevices, orig = md.getUserMedia.bind(md);",
+            "  var md = navigator.mediaDevices, muted = false, tracks = [], pcs = [], timer = null;",
+            "  function apply() {",
+            "    tracks = tracks.filter(function (t) { return t.readyState !== 'ended'; });",
+            "    tracks.forEach(function (t) { t.enabled = !muted; });",
+            "    pcs = pcs.filter(function (p) { return p.connectionState !== 'closed'; });",
+            "    pcs.forEach(function (p) {",
+            "      p.getSenders().forEach(function (s) { if (s.track && s.track.kind === 'audio') s.track.enabled = !muted; });",
+            "    });",
+            "  }",
+            "  window.__setMute = function (m) {",
+            "    muted = !!m; apply();",
+            "    if (muted && !timer) timer = setInterval(apply, 2000);",
+            "    if (!muted && timer) { clearInterval(timer); timer = null; }",
+            "  };",
+            "  ['RTCPeerConnection', 'webkitRTCPeerConnection'].forEach(function (n) {",
+            "    var P = window[n];",
+            "    if (!P) return;",
+            "    window[n] = new Proxy(P, { construct: function (t, a, nt) {",
+            "      var pc = Reflect.construct(t, a, nt); pcs.push(pc); return pc;",
+            "    } });",
+            "  });",
+            "  if (!md || !md.getUserMedia) return;",
+            "  var orig = md.getUserMedia.bind(md);",
             "  async function phoneMic() {",
             "    var list = async function () {",
             "      return (await md.enumerateDevices()).filter(function (d) {",
@@ -62,7 +89,7 @@ final class WebSession {
             "    return devs.find(function (d) { return d.label && !BT.test(d.label); });",
             "  }",
             "  md.getUserMedia = async function (c) {",
-            "    if (c && c.audio && !(c.audio.deviceId)) {",
+            "    if (c && c.audio && !c.audio.deviceId) {",
             "      try {",
             "        var phone = await phoneMic();",
             "        if (phone) {",
@@ -72,7 +99,9 @@ final class WebSession {
             "        }",
             "      } catch (e) { /* fall back to the page's own request */ }",
             "    }",
-            "    return orig(c);",
+            "    var stream = await orig(c);",
+            "    stream.getAudioTracks().forEach(function (t) { tracks.push(t); t.enabled = !muted; });",
+            "    return stream;",
             "  };",
             "})();");
 
@@ -88,7 +117,7 @@ final class WebSession {
     private Listener listener;
     private boolean active;
     private String startHost = "";
-    private boolean micShim = true;
+    private boolean muted;
     private long hangupAt;            // SystemClock.elapsedRealtime() deadline, 0 = no timer
     private long notifiedMinutes = -1;
 
@@ -120,8 +149,24 @@ final class WebSession {
         listener = l;
     }
 
-    void setMicShim(boolean enabled) {
-        micShim = enabled;
+    boolean isMuted() {
+        return muted;
+    }
+
+    /**
+     * Mutes or unmutes the outgoing audio only; the page, the call and the foreground service keep
+     * running, so unmuting is instant.
+     */
+    void setMuted(boolean value) {
+        muted = value;
+        if (webView != null) webView.evaluateJavascript("window.__setMute && window.__setMute(" + value + ")", null);
+        if (listener != null) listener.onMuted(value);
+        WebSessionService.refresh();
+    }
+
+    /** The shared WebView if it exists; never creates one. */
+    WebView peekWebView() {
+        return webView;
     }
 
     /** Time left on the timer, or -1 when none is running. */
@@ -180,6 +225,7 @@ final class WebSession {
         startHost = uri.getHost() == null ? "" : uri.getHost();
         active = true;
         hangupAt = 0;
+        muted = false;
         app.startForegroundService(new Intent(app, WebSessionService.class));
         wv.loadUrl(url);
     }
@@ -190,6 +236,7 @@ final class WebSession {
         active = false;
         main.removeCallbacks(tick);
         hangupAt = 0;
+        muted = false;
         if (webView != null) {
             webView.loadUrl("about:blank");
             webView.clearHistory();
@@ -197,6 +244,7 @@ final class WebSession {
         if (app != null) app.stopService(new Intent(app, WebSessionService.class));
         if (listener != null) {
             listener.onTimer(-1);
+            listener.onMuted(false);
             listener.onClosed(reason);
         }
     }
@@ -223,12 +271,12 @@ final class WebSession {
         wv.setWebViewClient(new WebViewClient() {
             @Override
             public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
-                if (micShim) view.evaluateJavascript(MIC_SHIM, null);
+                view.evaluateJavascript(shimScript(), null);
             }
 
             @Override
             public void onPageFinished(WebView view, String url) {
-                if (micShim) view.evaluateJavascript(MIC_SHIM, null);
+                view.evaluateJavascript(shimScript(), null);
             }
         });
         wv.setWebChromeClient(new WebChromeClient() {
@@ -249,6 +297,11 @@ final class WebSession {
             }
         });
         return wv;
+    }
+
+    /** The shim, plus the current mute state so a freshly loaded page starts in the right state. */
+    private String shimScript() {
+        return MIC_SHIM + "\nwindow.__setMute(" + muted + ");";
     }
 
     private boolean hostAllowed(Uri origin) {
