@@ -1,0 +1,64 @@
+name: Build iOS
+
+on:
+  push:
+    paths: ['ios/**', '.github/workflows/build-ios.yml']
+  pull_request:
+    paths: ['ios/**', '.github/workflows/build-ios.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-ios-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build unsigned IPA
+    runs-on: macos-15
+    timeout-minutes: 40
+    defaults:
+      run:
+        working-directory: ios
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate the Xcode project
+        run: xcodegen generate
+
+      - name: Build (unsigned; Sideloadly / AltStore sign it when installing)
+        run: |
+          xcodebuild -project Tether.xcodeproj -scheme Tether -configuration Release \
+            -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build
+
+      - name: Package the IPA
+        run: |
+          mkdir Payload
+          cp -R build/Build/Products/Release-iphoneos/Tether.app Payload/
+          zip -qry "$RUNNER_TEMP/tether.ipa" Payload
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tether-ipa
+          path: ${{ runner.temp }}/tether.ipa
+          if-no-files-found: error
+
+      # On main, also keep a stable download link (separate tag so the Android release is untouched):
+      # https://github.com/<owner>/<repo>/releases/download/ios-latest/tether.ipa
+      - name: Publish to the "ios-latest" release
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release delete ios-latest --cleanup-tag --yes || true
+          gh release create ios-latest "$RUNNER_TEMP/tether.ipa" \
+            --target "$GITHUB_SHA" --prerelease \
+            --title "Latest iOS build (#${{ github.run_number }})" \
+            --notes "Built from ${GITHUB_SHA::7}. Unsigned: install with Sideloadly or AltStore."

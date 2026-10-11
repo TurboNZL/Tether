@@ -1,0 +1,35 @@
+name: Tether
+options:
+  bundleIdPrefix: app.tether
+  deploymentTarget:
+    iOS: "16.0"
+packages:
+  WebRTC:
+    url: https://github.com/stasel/WebRTC.git
+    exactVersion: 154.0.0
+targets:
+  Tether:
+    type: application
+    platform: iOS
+    sources:
+      - Tether
+    dependencies:
+      - package: WebRTC
+    info:
+      path: Tether/Info.plist
+      properties:
+        CFBundleDisplayName: Tether
+        # Keeps the call (and the microphone) running with the screen locked or the app in the background.
+        UIBackgroundModes: [audio]
+        NSMicrophoneUsageDescription: Tether uses the microphone to carry your voice on a call.
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        ITSAppUsesNonExemptEncryption: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.tether
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        SWIFT_VERSION: "5.0"
+        TARGETED_DEVICE_FAMILY: "1"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
