@@ -1,10 +1,12 @@
 // Caches the app shell so Tether opens instantly and offline. Calls themselves need the network.
-const CACHE = 'tether-v1';
+const CACHE = 'tether-v2';
 const SHELL = [
   './',
   './index.html',
   './manifest.webmanifest',
   './vendor/peerjs.min.js',
+  './favicon.ico',
+  './icons/favicon-32.png',
   './icons/icon-192.png',
   './icons/icon-512.png',
   './icons/icon-maskable-512.png',
