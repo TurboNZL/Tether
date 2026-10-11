@@ -41,6 +41,7 @@ public class MainActivity extends Activity implements CallManager.Listener {
     private static final String PREF_WEB_URL = "webUrl";
     private static final String PREF_VOLUME = "volume";
     private static final String PREF_BRIGHTNESS = "brightness";
+    private static final String PREF_SESSION_URL = "sessionUrl";
     private static final int MAX_LOG_CHARS = 8000;
     private static final int[] TIMER_MINUTES = {0, 15, 30, 45, 60, 90, 120, 180, 240, 360, 480};
     private static final String TIMER_HELP = "Ends the call on this phone only, after the time you pick. "
@@ -66,6 +67,7 @@ public class MainActivity extends Activity implements CallManager.Listener {
     private GlyphView micChevron;
     private EditText webUrl;
     private EditText roomInput;
+    private EditText sessionUrl;
     private TextView roomCode;
     private TextView volumeValue;
     private GlassSlider volumeSlider;
@@ -159,6 +161,7 @@ public class MainActivity extends Activity implements CallManager.Listener {
         buildTimerCard();
         buildInviteCard();
         buildJoinCard();
+        buildSessionCard();
         buildKeepAliveCard();
         buildDiagnosticsCard();
 
@@ -414,6 +417,43 @@ public class MainActivity extends Activity implements CallManager.Listener {
         });
         body.addView(join, lp(-1, -2, 0, 12, 0, 0));
         content.addView(card, lp(-1, -2, 0, 14, 0, 0));
+    }
+
+    private void buildSessionCard() {
+        GlassPanel card = card("Web session");
+        LinearLayout body = (LinearLayout) card.getChildAt(2);
+        sessionUrl = field("https://…");
+        sessionUrl.setInputType(InputType.TYPE_TEXT_VARIATION_URI);
+        sessionUrl.setText(prefs().getString(PREF_SESSION_URL, ""));
+        body.addView(sessionUrl, new LinearLayout.LayoutParams(-1, -2));
+        TextView hint = Ui.text(this, "Opens a web call page in an embedded browser (desktop layout) that keeps "
+                + "running with the screen off. Has a hang up timer that closes the page, and a mic selection "
+                + "shim that prefers the phone's own mic over a Bluetooth headset.", 13f,
+                Ui.TEXT_TERTIARY, "sans-serif");
+        body.addView(hint, lp(-1, -2, 0, 8, 0, 0));
+        TextView open = Ui.text(this, "Open", 16f, Ui.TEXT_PRIMARY, "sans-serif-medium");
+        open.setGravity(Gravity.CENTER);
+        open.setBackground(flatButton());
+        open.setClickable(true);
+        open.setPadding(0, Ui.dp(this, 13), 0, Ui.dp(this, 13));
+        open.setOnClickListener(v -> openSession());
+        body.addView(open, lp(-1, -2, 0, 12, 0, 0));
+        content.addView(card, lp(-1, -2, 0, 14, 0, 0));
+    }
+
+    private void openSession() {
+        String url = sessionUrl.getText().toString().trim();
+        if (url.isEmpty()) {
+            onLog("enter the page address first");
+            return;
+        }
+        if (!url.contains("://")) url = "https://" + url;
+        if (!url.startsWith("https://")) {
+            onLog("only https addresses can be opened");
+            return;
+        }
+        prefs().edit().putString(PREF_SESSION_URL, url).apply();
+        startActivity(new Intent(this, WebSessionActivity.class).putExtra(WebSessionActivity.EXTRA_URL, url));
     }
 
     private void buildKeepAliveCard() {
