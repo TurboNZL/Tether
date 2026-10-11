@@ -11,9 +11,12 @@ import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.GradientDrawable;
+import android.media.AudioDeviceInfo;
 import android.media.AudioManager;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -48,6 +51,7 @@ public class WebSessionActivity extends Activity implements WebSession.Listener 
     private static final String PREF_BRIGHTNESS = "brightness";
     private static final String PREF_WEB_MIC = "webMic";
     private static final String PREF_WEB_AEC = "webAec";
+    private static final String PREF_WEB_ZOOM = "webZoom";
 
     private FrameLayout holder;
     private TextView countdown;
@@ -62,8 +66,9 @@ public class WebSessionActivity extends Activity implements WebSession.Listener 
     private TextView sheetStatus;
     private TextView micValue;
     private TextView infoView;
-    private List<String> micLabels = new ArrayList<>();
-    private String micCurrent = "";
+    private final MicTester micTester = new MicTester();
+    private final Handler ui = new Handler(Looper.getMainLooper());
+    private Runnable zoomApply;
     private long testStartedAt;
     private boolean heardSound;
 
@@ -334,6 +339,27 @@ public class WebSessionActivity extends Activity implements WebSession.Listener 
         col.addView(Ui.text(this, "Dims this app below your screen's minimum brightness.", 13f,
                 Ui.TEXT_TERTIARY, "sans-serif"), lp(0, 0, 14));
 
+        // Page zoom: lays the page out again at a different width, like browser zoom (not a magnifier)
+        float zoom = Math.max(0.5f, prefs().getFloat(PREF_WEB_ZOOM, 1f));
+        TextView zoomValue = Ui.text(this, pct(zoom), 30f, Ui.TEXT_PRIMARY, "sans-serif");
+        col.addView(label("Page zoom"));
+        col.addView(zoomValue, lp(4, 0, 2));
+        GlassSlider zoomSlider = new GlassSlider(this, 3f, 1f);
+        zoomSlider.setValue(zoom);
+        zoomSlider.setListener((value, fromUser) -> {
+            float z = Math.max(0.5f, value);
+            zoomValue.setText(pct(z));
+            if (!fromUser) return;
+            prefs().edit().putFloat(PREF_WEB_ZOOM, z).apply();
+            // Laying the page out again is heavy: wait until the slider has settled.
+            if (zoomApply != null) ui.removeCallbacks(zoomApply);
+            zoomApply = () -> WebSession.get().setZoom(z);
+            ui.postDelayed(zoomApply, 250);
+        });
+        col.addView(zoomSlider, new LinearLayout.LayoutParams(-1, -2));
+        col.addView(Ui.text(this, "Makes the whole page bigger or smaller by changing the width it is laid out "
+                + "at, like browser zoom. Pinch still magnifies.", 13f, Ui.TEXT_TERTIARY, "sans-serif"), lp(0, 0, 14));
+
         // Page info: what the page sees, to check the desktop layout
         TextView info = Ui.text(this, "Show page info", 15f, Ui.TEXT_PRIMARY, "sans-serif-medium");
         info.setGravity(Gravity.CENTER);
@@ -356,7 +382,7 @@ public class WebSessionActivity extends Activity implements WebSession.Listener 
             w.setDimAmount(0.35f);
         }
         d.setOnDismissListener(x -> {
-            WebSession.get().testMic(false);
+            micTester.stop();
             sheet = null;
             sheetMeter = null;
             sheetStatus = null;
@@ -366,10 +392,58 @@ public class WebSessionActivity extends Activity implements WebSession.Listener 
         sheet = d;
         d.show();
 
+        startMicTest();
+    }
+
+    // ---- microphone: the phone's real inputs, and a level test -------------------------------------
+
+    private AudioDeviceInfo chosenInput() {
+        String key = prefs().getString(PREF_WEB_MIC, "");
+        if (key.isEmpty()) return null;
+        for (AudioDeviceInfo d : WebSession.inputs(this)) {
+            if (WebSession.micKey(d).equals(key)) return d;
+        }
+        return null;
+    }
+
+    private void startMicTest() {
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            onMicTestError("microphone permission denied - allow it in Android settings > Apps > Tether");
+            return;
+        }
+        micTester.stop();
         testStartedAt = System.currentTimeMillis();
         heardSound = false;
-        session.requestDevices();
-        session.testMic(true);
+        if (sheetStatus != null) {
+            sheetStatus.setText("Speak - the bar should move.");
+            sheetStatus.setTextColor(Ui.TEXT_TERTIARY);
+        }
+        micTester.start(chosenInput(), new MicTester.Listener() {
+            @Override
+            public void onLevel(float rms) {
+                if (sheetMeter == null || sheetStatus == null) return;
+                sheetMeter.setRms(rms);
+                if (rms > 0.01f) heardSound = true;
+                if (heardSound) {
+                    sheetStatus.setText("Mic is working.");
+                    sheetStatus.setTextColor(Ui.GREEN);
+                } else if (System.currentTimeMillis() - testStartedAt > 4000) {
+                    sheetStatus.setText("No sound yet. Speak, or pick another microphone below.");
+                    sheetStatus.setTextColor(Ui.AMBER);
+                }
+            }
+
+            @Override
+            public void onError(String message) {
+                onMicTestError(message);
+            }
+        });
+    }
+
+    private void onMicTestError(String message) {
+        if (sheetStatus == null) return;
+        sheetStatus.setText("Could not open the microphone: " + message);
+        sheetStatus.setTextColor(Ui.RED);
     }
 
     private TextView label(String text) {
@@ -387,25 +461,30 @@ public class WebSessionActivity extends Activity implements WebSession.Listener 
     }
 
     private String micSummary() {
-        String chosen = prefs().getString(PREF_WEB_MIC, "");
-        if (!chosen.isEmpty()) return chosen;
-        return micCurrent.isEmpty() ? "Automatic (phone mic)" : "Automatic - " + micCurrent;
+        String key = prefs().getString(PREF_WEB_MIC, "");
+        if (key.isEmpty()) return "Automatic (page default)";
+        AudioDeviceInfo d = chosenInput();
+        return d == null ? "Chosen input not available" : CallManager.describe(d);
     }
 
     private void chooseMic() {
+        List<AudioDeviceInfo> inputs = WebSession.inputs(this);
         List<String> items = new ArrayList<>();
-        items.add("Automatic (phone mic)");
-        items.addAll(micLabels);
-        String chosen = prefs().getString(PREF_WEB_MIC, "");
-        int checked = chosen.isEmpty() ? 0 : Math.max(0, micLabels.indexOf(chosen) + 1);
+        items.add("Automatic (page default)");
+        for (AudioDeviceInfo d : inputs) items.add(CallManager.describe(d));
+        String key = prefs().getString(PREF_WEB_MIC, "");
+        int checked = 0;
+        for (int i = 0; i < inputs.size(); i++) {
+            if (WebSession.micKey(inputs.get(i)).equals(key)) checked = i + 1;
+        }
         new AlertDialog.Builder(this)
                 .setTitle("Microphone")
                 .setSingleChoiceItems(items.toArray(new String[0]), checked, (d, which) -> {
-                    String label = which == 0 ? "" : micLabels.get(which - 1);
-                    prefs().edit().putString(PREF_WEB_MIC, label).apply();
-                    WebSession.get().setMic(label);
-                    WebSession.get().requestDevices();
-                    if (micValue != null) micValue.setText(label.isEmpty() ? micSummary() : label);
+                    String chosen = which == 0 ? "" : WebSession.micKey(inputs.get(which - 1));
+                    prefs().edit().putString(PREF_WEB_MIC, chosen).apply();
+                    WebSession.get().setMicChoice(chosen);
+                    if (micValue != null) micValue.setText(micSummary());
+                    startMicTest(); // test the one just picked
                     d.dismiss();
                 })
                 .show();
@@ -484,7 +563,7 @@ public class WebSessionActivity extends Activity implements WebSession.Listener 
     private void openPage() {
         WebSession session = WebSession.get();
         session.configure(prefs().getFloat(PREF_VOLUME, 1f), prefs().getString(PREF_WEB_MIC, ""),
-                prefs().getBoolean(PREF_WEB_AEC, true));
+                prefs().getBoolean(PREF_WEB_AEC, true), prefs().getFloat(PREF_WEB_ZOOM, 1f));
         showPage();
         session.open(this, pendingUrl);
         session.setCallMeter(true);
@@ -516,36 +595,15 @@ public class WebSessionActivity extends Activity implements WebSession.Listener 
     }
 
     @Override
-    public void onTestLevel(float rms) {
-        if (sheetMeter == null || sheetStatus == null) return;
-        if (rms < 0) {
-            sheetStatus.setText("Could not open the microphone - check the choice below and the app's permission.");
-            sheetStatus.setTextColor(Ui.RED);
-            return;
-        }
-        sheetMeter.setRms(rms);
-        if (rms > 0.01f) heardSound = true;
-        if (heardSound) {
-            sheetStatus.setText("Mic is working.");
-            sheetStatus.setTextColor(Ui.GREEN);
-        } else if (System.currentTimeMillis() - testStartedAt > 4000) {
-            sheetStatus.setText("No sound yet. Speak, or check the microphone choice below.");
-            sheetStatus.setTextColor(Ui.AMBER);
-        }
-    }
-
-    @Override
-    public void onDevices(List<String> labels, String current) {
-        micLabels = labels;
-        micCurrent = current;
-        if (micValue != null) micValue.setText(micSummary());
-    }
-
-    @Override
     public void onInfo(String text) {
         if (infoView == null) return;
         infoView.setText(text);
         infoView.setVisibility(View.VISIBLE);
+    }
+
+    @Override
+    public void onNotice(String text) {
+        Toast.makeText(getApplicationContext(), text, Toast.LENGTH_LONG).show();
     }
 
     @Override

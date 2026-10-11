@@ -3,18 +3,17 @@
  * idempotent). The native side talks to it through window.__tether and hears back through
  * window.TetherBridge.post(type, json).
  *
- *  - desktop emulation: desktop-sized layout viewport and desktop navigator properties
- *  - mic selection:     prefer the phone's own mic over a Bluetooth headset, or the one chosen in the app
+ *  - desktop emulation: desktop-sized layout viewport (scalable: "zoom") and desktop navigator properties
+ *  - virtual mic:       audio captured natively from a chosen input device, played into the page as its microphone
  *  - mute:              switch the outgoing audio off and on without touching the page's own UI
  *  - volume:            0-200% gain on the other person's voice (only routed when it is not 100%)
- *  - level meters:      the live outgoing level, and a stand-alone mic test
+ *  - level meter:       the live outgoing level of the call
  */
 (function () {
   if (window.__tether) return;
   var T = window.__tether = {};
   var WIDTH = 1280;
-  var BT = /bluetooth|bt[\s_-]|headset|buds|airpods|a2dp|hfp|sco/i;
-  var cfg = { muted: false, volume: 1, mic: '', aec: true };
+  var cfg = { muted: false, volume: 1, aec: true, zoom: 1 };
   var tracks = [], pcs = [];
 
   function post(type, data) {
@@ -32,6 +31,8 @@
   } catch (e) { /* best effort */ }
 
   // Pages that ask for a device-width layout would otherwise get the phone layout whatever the UA says.
+  // The layout width is also the zoom: a narrower layout shows the same page bigger (like browser zoom,
+  // everything is laid out again, nothing is just magnified).
   function viewport() {
     var m = document.querySelector('meta[name=viewport]');
     if (!m) {
@@ -40,9 +41,13 @@
       m.name = 'viewport';
       document.head.appendChild(m);
     }
-    if (m.content !== 'width=' + WIDTH) m.content = 'width=' + WIDTH;
+    var w = Math.round(WIDTH / cfg.zoom);
+    var want = 'width=' + w + ', initial-scale=' + ((window.screen.width || w) / w).toFixed(3);
+    if (m.content !== want) m.content = want;
   }
   viewport();
+  window.addEventListener('orientationchange', function () { setTimeout(viewport, 300); });
+  T.setZoom = function (z) { cfg.zoom = Math.max(0.5, Math.min(3, +z || 1)); viewport(); };
   new MutationObserver(viewport).observe(document, { childList: true, subtree: true, attributes: true, attributeFilter: ['content'] });
 
   // ---- audio context shared by the volume path and the meters --------------------------
@@ -101,45 +106,63 @@
   var md = navigator.mediaDevices;
   var orig = md && md.getUserMedia ? md.getUserMedia.bind(md) : null;
 
-  async function micList() {
-    var all = async function () {
-      return (await md.enumerateDevices()).filter(function (d) {
-        return d.kind === 'audioinput' && d.deviceId && d.deviceId !== 'default' && d.deviceId !== 'communications';
-      });
-    };
-    var devs = await all();
-    if (devs.length && !devs[0].label) {
-      // Labels are only exposed after a grant: take and release a throwaway stream.
-      var tmp = await orig({ audio: true });
-      tmp.getTracks().forEach(function (t) { t.stop(); });
-      devs = await all();
-    }
-    return devs;
-  }
-  async function pickMic() {
-    var devs = await micList();
-    if (cfg.mic) {
-      var chosen = devs.find(function (d) { return d.label === cfg.mic; });
-      if (chosen) return chosen;
-    }
-    return devs.find(function (d) { return d.label && !BT.test(d.label); });
-  }
   function adopt(stream) {
     stream.getAudioTracks().forEach(function (t) { tracks.push(t); t.enabled = !cfg.muted; });
   }
 
+  // ---- virtual mic: audio captured natively from a chosen device, played into the page ----------------
+  // The page cannot see the phone's individual inputs, so the app captures the chosen one itself and
+  // pushes 16-bit PCM here; it is scheduled into a MediaStreamDestination that stands in for the mic.
+  var vm = { on: false, dest: null, next: 0, live: false, tracks: [] };
+  function vmStream() {
+    var c = ensureCtx();
+    if (!vm.dest) vm.dest = c.createMediaStreamDestination();
+    var t = vm.dest.stream.getAudioTracks()[0].clone();
+    vm.tracks.push(t);
+    vmCheck();
+    return new MediaStream([t]);
+  }
+  // Tell the app when the page does / does not hold the virtual mic, so capture runs only when needed.
+  function vmCheck() {
+    vm.tracks = vm.tracks.filter(function (t) { return t.readyState === 'live'; });
+    var want = vm.on && vm.tracks.length > 0;
+    if (want !== vm.live) { vm.live = want; post('vmic', want ? 'on' : 'off'); }
+  }
+  setInterval(vmCheck, 1000);
+  T.pcm = function (b64) {
+    if (!ctx || !vm.dest) return;
+    var bin = atob(b64), n = bin.length >> 1, u8 = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+    var i16 = new Int16Array(u8.buffer, 0, n), f = new Float32Array(n);
+    for (var j = 0; j < n; j++) f[j] = i16[j] / 32768;
+    var buf = ctx.createBuffer(1, n, 48000);
+    buf.copyToChannel(f, 0);
+    var src = ctx.createBufferSource();
+    src.buffer = buf;
+    src.connect(vm.dest);
+    var now = ctx.currentTime;
+    if (vm.next < now + 0.03) vm.next = now + 0.16;   // (re)start with a small cushion
+    else if (vm.next > now + 0.6) return;             // too far behind: drop this frame to stay close to live
+    src.start(vm.next);
+    vm.next += buf.duration;
+  };
+
   if (orig) {
     md.getUserMedia = async function (c) {
-      if (c && c.audio && (cfg.mic || !c.audio.deviceId)) {
-        try {
-          var dev = await pickMic();
+      var stream;
+      if (c && c.audio && vm.on) {
+        stream = vmStream();
+        if (c.video) {
+          try { (await orig({ video: c.video })).getVideoTracks().forEach(function (t) { stream.addTrack(t); }); } catch (e) { /* audio only */ }
+        }
+      } else {
+        if (c && c.audio && !cfg.aec) {
           var audio = c.audio === true ? {} : Object.assign({}, c.audio);
-          if (dev) audio.deviceId = { exact: dev.deviceId };
-          if (!cfg.aec) { audio.echoCancellation = false; audio.noiseSuppression = false; audio.autoGainControl = false; }
+          audio.echoCancellation = false; audio.noiseSuppression = false; audio.autoGainControl = false;
           c = Object.assign({}, c, { audio: audio });
-        } catch (e) { /* fall back to the page's own request */ }
+        }
+        stream = await orig(c);
       }
-      var stream = await orig(c);
       adopt(stream);
       return stream;
     };
@@ -157,21 +180,15 @@
     }
     applyMute();
   }
-  T.setMic = async function (label) {
-    cfg.mic = label || '';
+  // Use the natively captured device (true) or the page's own default capture (false); switches a live call.
+  T.setVirtualMic = async function (on) {
+    vm.on = !!on;
+    vmCheck();
     await recapture();
-    if (testStream) await T.testMic(true);
   };
   T.setProcessing = async function (on) {
     cfg.aec = !!on;
-    await recapture();
-    if (testStream) await T.testMic(true);
-  };
-  T.listMics = async function () {
-    try {
-      var devs = await micList(), cur = await pickMic();
-      post('devices', { list: devs.map(function (d) { return d.label; }), current: cur ? cur.label : '' });
-    } catch (e) { post('devices', { list: [], current: '' }); }
+    if (!vm.on) await recapture();   // with the virtual mic the app applies it natively
   };
 
   // ---- volume: gain on the other person's voice ----------------------------------------------------
@@ -251,35 +268,22 @@
     };
     return m;
   }
-  var callMeter = null, testMeter = null, testStream = null;
+  var callMeter = null;
 
   // The outgoing level of the call itself (muted shows as silence).
   T.setMeter = function (on) {
     if (callMeter) { callMeter.stop(); callMeter = null; }
     if (on) callMeter = startMeter('level', function () {
-      return tracks.find(function (t) { return t.readyState === 'live' && t !== (testStream && testStream.getAudioTracks()[0]); });
+      return tracks.find(function (t) { return t.readyState === 'live'; });
     });
-  };
-
-  // A stand-alone mic test that works before or during a call, using the same mic the call would use.
-  T.testMic = async function (on) {
-    if (testMeter) { testMeter.stop(); testMeter = null; }
-    if (testStream) { testStream.getTracks().forEach(function (t) { t.stop(); }); testStream = null; }
-    if (!on || !orig) return;
-    try {
-      testStream = await md.getUserMedia({ audio: true });
-      var tt = testStream.getAudioTracks()[0];
-      tracks = tracks.filter(function (x) { return x !== tt; }); // not part of the call, so never muted with it
-      tt.enabled = true;
-      testMeter = startMeter('testlevel', function () { return tt; });
-    } catch (e) { post('testlevel', '-1'); }
   };
 
   // ---- misc ----------------------------------------------------------------------------------------
   T.configure = function (o) {
     if (!o) return;
-    if ('mic' in o) cfg.mic = o.mic || '';
     if ('aec' in o) cfg.aec = !!o.aec;
+    if ('zoom' in o) T.setZoom(o.zoom);
+    if ('virtual' in o) { vm.on = !!o.virtual; vmCheck(); }
     if ('volume' in o) T.setVolume(o.volume);
     if ('muted' in o) T.setMute(o.muted);
   };
@@ -293,6 +297,6 @@
     });
   };
   T.state = function () {
-    return { volume: cfg.volume, muted: cfg.muted, mic: cfg.mic, aec: cfg.aec, routed: routed.length, ctx: ctx ? ctx.state : null, tracks: tracks.length };
+    return { volume: cfg.volume, muted: cfg.muted, aec: cfg.aec, zoom: cfg.zoom, virtual: vm.on, routed: routed.length, ctx: ctx ? ctx.state : null, tracks: tracks.length };
   };
 })();

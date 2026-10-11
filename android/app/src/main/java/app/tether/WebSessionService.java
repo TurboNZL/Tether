@@ -101,17 +101,28 @@ public class WebSessionService extends Service {
                 PendingIntent.getService(this, 3,
                         new Intent(this, WebSessionService.class).setAction(ACTION_CLOSE),
                         PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT)).build();
-        return new Notification.Builder(this, CHANNEL_ID)
+        Notification.Builder builder = new Notification.Builder(this, CHANNEL_ID)
                 .setSmallIcon(R.drawable.ic_stat_call)
                 .setContentTitle(muted ? "Tether - web session, mic muted" : "Tether - web session")
-                .setContentText(left >= 0 ? "Closes in " + WebSession.formatMinutes(left) : "Page open, no timer")
                 .setContentIntent(open)
                 .setOngoing(true)
                 .setOnlyAlertOnce(true)
                 .setCategory(Notification.CATEGORY_CALL)
                 .addAction(mute)
-                .addAction(close)
-                .build();
+                .addAction(close);
+        if (left >= 0) {
+            // A live countdown that the system keeps ticking, so the notification needs no per-second updates.
+            long endsAt = System.currentTimeMillis() + left;
+            builder.setContentText("Hangs up at " + android.text.format.DateFormat.getTimeFormat(this).format(endsAt)
+                    + " (in " + WebSession.formatMinutes(left) + ")")
+                    .setWhen(endsAt)
+                    .setShowWhen(true)
+                    .setUsesChronometer(true)
+                    .setChronometerCountDown(true);
+        } else {
+            builder.setContentText("Page open, no hang up timer");
+        }
+        return builder.build();
     }
 
     @Override
