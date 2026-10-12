@@ -309,6 +309,9 @@
   }
   // Use the natively captured device (true) or the page's own default capture (false); switches a live call.
   T.setVirtualMic = async function (on) {
+    // Moving from one native input to another changes only what the app feeds in: the track the call is
+    // already sending stays, so nothing is renegotiated or replaced (which is what broke calls).
+    if (vm.on === !!on) { vm.nextFrame = 0; return; }
     vm.on = !!on;
     vmCheck();
     await recapture();

@@ -635,6 +635,7 @@ public class WebSessionActivity extends Activity implements WebSession.Listener 
                     prefs().edit().putString(PREF_WEB_MIC, chosen).apply();
                     WebSession.get().setMicChoice(chosen);
                     if (micValue != null) micValue.setText(micSummary());
+                    InputRoute.apply(this, chosenInput());
                     startMicTest(); // test the one just picked
                     d.dismiss();
                 })

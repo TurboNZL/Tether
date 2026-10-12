@@ -296,7 +296,13 @@ final class WebSession {
             listener.onNotice("The chosen microphone is not available now; using the system default input.");
         }
         vmic.setMuted(muted);
+        InputRoute.apply(app, device);
         vmic.start(device, aec, new VirtualMic.Listener() {
+            @Override
+            public void onNotice(String message) {
+                if (listener != null) listener.onNotice(message);
+            }
+
             @Override
             public void onFrame(String base64Pcm) {
                 js("__tether.pcm('" + base64Pcm + "')");
@@ -399,6 +405,7 @@ final class WebSession {
         pageLoaded = false;
         pageWantsMic = false;
         stopCapture();
+        InputRoute.clear(app);
         if (webView != null) {
             webView.loadUrl("about:blank");
             webView.clearHistory();
