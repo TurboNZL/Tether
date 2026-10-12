@@ -234,6 +234,7 @@ final class WebSession {
      */
     void setMicChoice(String key) {
         micKey = key == null ? "" : key;
+        js("__tether.configure({micLabel:" + JSONObject.quote(micLabel()) + "})");
         js("__tether.setVirtualMic(" + !micKey.isEmpty() + ")");
         if (micKey.isEmpty()) {
             stopCapture();
@@ -272,6 +273,12 @@ final class WebSession {
     /** A key that identifies an input across runs (device ids are not stable). */
     static String micKey(AudioDeviceInfo d) {
         return d.getType() + "|" + d.getProductName();
+    }
+
+    /** The chosen input's name, which is also what the page lists as its microphone. */
+    private String micLabel() {
+        AudioDeviceInfo d = micKey.isEmpty() ? null : findInput(micKey);
+        return d == null ? "" : CallManager.describe(d);
     }
 
     private AudioDeviceInfo findInput(String key) {
@@ -488,7 +495,7 @@ final class WebSession {
         try {
             JSONObject settings = new JSONObject()
                     .put("muted", muted).put("volume", volume).put("aec", aec).put("zoom", zoom)
-                    .put("micGain", micGain).put("virtual", !micKey.isEmpty());
+                    .put("micGain", micGain).put("virtual", !micKey.isEmpty()).put("micLabel", micLabel());
             return sessionScript() + "\nwindow.__tether.configure(" + settings + ");"
                     + (callMeter ? "\nwindow.__tether.setMeter(true);" : "");
         } catch (JSONException e) {

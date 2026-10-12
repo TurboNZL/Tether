@@ -47,7 +47,7 @@ audio as `USAGE_MEDIA`. The in-app diagnostics show `mode`, `a2dpOn` and the inc
     countdown and the clock time it will hang up at.
   - **Microphone**: a page only sees the system default input, so the phone's real inputs (the same list as the main screen)
     are captured natively (plain MIC source, optional platform echo cancellation / noise suppression) and played into the
-    page as its microphone (`getUserMedia` wrapper in `assets/session.js`). "Automatic" leaves the page's own capture alone.
+    page as its microphone (`getUserMedia` wrapper in `assets/session.js`). There is no automatic input: the phone's own microphone is used until another is picked, and the page lists the chosen input by name.
     The choice can be changed mid-call without renegotiating.
   - **Mute is locked, not just switched**: a page can flip its own track's on/off switch at any time (its own mute
     button does), so every outgoing audio track is locked: the page still reads and writes the switch as usual, but the real
@@ -60,7 +60,7 @@ audio as `USAGE_MEDIA`. The in-app diagnostics show `mode`, `a2dpOn` and the inc
   - **Microphone volume** (0-300% gain on what the other person hears) and a **record and play back** test: it records a few
     seconds with the same settings the call uses (so it includes the gain), plays them back through the phone's media
     volume, and rates the peak level (clipping / good / faint / silent). It works while the call is muted: with a chosen phone
-    input the app reads the microphone itself; with "Automatic" the page records it. After a faint or too-loud result, one tap
+    input the app reads the microphone itself. After a faint or too-loud result, one tap
     sets the microphone volume that would have put the peak near -6 dB.
   - The mute check asks the page directly (page timers are slowed in the background, so the page does not volunteer
     confirmations); it fixes a leak at once, and warns about an unanswering page only when a real page is loaded, after three

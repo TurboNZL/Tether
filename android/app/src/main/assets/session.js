@@ -174,7 +174,7 @@
   // ---- virtual mic: audio captured natively from a chosen device, played into the page ----------------
   // The page cannot see the phone's individual inputs, so the app captures the chosen one itself and
   // pushes 16-bit PCM here; it is scheduled into a MediaStreamDestination that stands in for the mic.
-  var vm = { on: false, dest: null, gain: null, nextFrame: 0, live: false, tracks: [] };
+  var vm = { label: '', on: false, dest: null, gain: null, nextFrame: 0, live: false, tracks: [] };
   function vmStream() {
     var c = ensureCtx();
     if (!vm.dest) {
@@ -241,7 +241,7 @@
   // page is always shown one usable, named microphone; its id is accepted (and ignored) when it asks for it.
   var MIC_ID = 'default';
   function fakeMic() {
-    var d = { deviceId: MIC_ID, kind: 'audioinput', label: 'Default microphone', groupId: 'tether-mic' };
+    var d = { deviceId: MIC_ID, kind: 'audioinput', label: vm.label || 'Default microphone', groupId: 'tether-mic' };
     d.toJSON = function () { return { deviceId: d.deviceId, kind: d.kind, label: d.label, groupId: d.groupId }; };
     return d;
   }
@@ -470,6 +470,7 @@
     if ('aec' in o) cfg.aec = !!o.aec;
     if ('zoom' in o) T.setZoom(o.zoom);
     if ('micGain' in o) { cfg.micGain = Math.max(0, Math.min(3, +o.micGain || 0)); if (vm.gain) vm.gain.gain.value = cfg.micGain; }
+    if ('micLabel' in o) vm.label = String(o.micLabel || '');
     if ('virtual' in o) { vm.on = !!o.virtual; vmCheck(); }
     if ('volume' in o) T.setVolume(o.volume);
     if ('muted' in o) T.setMute(o.muted);

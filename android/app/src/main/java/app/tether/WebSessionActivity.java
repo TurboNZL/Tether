@@ -453,11 +453,21 @@ public class WebSessionActivity extends Activity implements WebSession.Listener 
 
     private AudioDeviceInfo chosenInput() {
         String key = prefs().getString(PREF_WEB_MIC, "");
-        if (key.isEmpty()) return null;
         for (AudioDeviceInfo d : WebSession.inputs(this)) {
             if (WebSession.micKey(d).equals(key)) return d;
         }
         return null;
+    }
+
+    /** There is no "automatic" input: until one is picked, the phone's own microphone is used (and shown). */
+    private void ensureMicChoice() {
+        if (!prefs().getString(PREF_WEB_MIC, "").isEmpty()) return;
+        AudioDeviceInfo pick = null;
+        for (AudioDeviceInfo d : WebSession.inputs(this)) {
+            if (pick == null) pick = d;
+            if (d.getType() == AudioDeviceInfo.TYPE_BUILTIN_MIC) { pick = d; break; }
+        }
+        if (pick != null) prefs().edit().putString(PREF_WEB_MIC, WebSession.micKey(pick)).apply();
     }
 
     private void startMicTest() {
@@ -498,40 +508,18 @@ public class WebSessionActivity extends Activity implements WebSession.Listener 
     private void startLoopback() {
         if (loopbackStatus == null) return;
         if (loopbackAction != null) loopbackAction.setVisibility(View.GONE);
-        // With a specific phone input chosen, the app reads that microphone itself, so the preview works
-        // whether or not the call is muted. With "Automatic" the call uses the page's own capture, so the
-        // page records it (it is never muted with the call either).
-        if (!prefs().getString(PREF_WEB_MIC, "").isEmpty()) {
-            if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-                onMicTestError("microphone permission denied - allow it in Android settings > Apps > Tether");
-                return;
-            }
-            micPreview.cancel();
-            micTester.stop(); // one reader at a time keeps the level bar from fighting the preview
-            micPreview.start(chosenInput(), prefs().getBoolean(PREF_WEB_AEC, true), micGain, LOOPBACK_SECONDS,
-                    (state, peak, verdict, message) -> {
-                        onLoopback(state, peak, verdict, message);
-                        if (state.equals("done") || state.equals("error")) startMicTest(); // the level bar resumes
-                    });
+        // The app reads the chosen input itself, so the preview works whether or not the call is muted.
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            onMicTestError("microphone permission denied - allow it in Android settings > Apps > Tether");
             return;
         }
-        if (!WebSession.get().isActive()) {
-            loopbackStatus.setText("Open the page first - with Automatic the test records through it.");
-            loopbackStatus.setTextColor(Ui.AMBER);
-            return;
-        }
-        loopbackStatus.setText("Starting…");
-        loopbackStatus.setTextColor(Ui.TEXT_TERTIARY);
-        WebSession.get().startLoopback(LOOPBACK_SECONDS);
-        // The page may not be ready (still loading, or not a page that can record).
-        if (loopbackWatchdog != null) ui.removeCallbacks(loopbackWatchdog);
-        loopbackWatchdog = () -> {
-            if (loopbackStatus != null && "Starting…".contentEquals(loopbackStatus.getText())) {
-                loopbackStatus.setText("Could not start. Wait for the page to finish loading and try again.");
-                loopbackStatus.setTextColor(Ui.RED);
-            }
-        };
-        ui.postDelayed(loopbackWatchdog, 3000);
+        micPreview.cancel();
+        micTester.stop(); // one reader at a time keeps the level bar from fighting the preview
+        micPreview.start(chosenInput(), prefs().getBoolean(PREF_WEB_AEC, true), micGain, LOOPBACK_SECONDS,
+                (state, peak, verdict, message) -> {
+                    onLoopback(state, peak, verdict, message);
+                    if (state.equals("done") || state.equals("error")) startMicTest(); // the level bar resumes
+                });
     }
 
     @Override
@@ -626,8 +614,7 @@ public class WebSessionActivity extends Activity implements WebSession.Listener 
     }
 
     private String micSummary() {
-        String key = prefs().getString(PREF_WEB_MIC, "");
-        if (key.isEmpty()) return "Automatic (page default)";
+        ensureMicChoice();
         AudioDeviceInfo d = chosenInput();
         return d == null ? "Chosen input not available" : CallManager.describe(d);
     }
@@ -635,17 +622,16 @@ public class WebSessionActivity extends Activity implements WebSession.Listener 
     private void chooseMic() {
         List<AudioDeviceInfo> inputs = WebSession.inputs(this);
         List<String> items = new ArrayList<>();
-        items.add("Automatic (page default)");
         for (AudioDeviceInfo d : inputs) items.add(CallManager.describe(d));
         String key = prefs().getString(PREF_WEB_MIC, "");
         int checked = 0;
         for (int i = 0; i < inputs.size(); i++) {
-            if (WebSession.micKey(inputs.get(i)).equals(key)) checked = i + 1;
+            if (WebSession.micKey(inputs.get(i)).equals(key)) checked = i;
         }
         new AlertDialog.Builder(this)
                 .setTitle("Microphone")
                 .setSingleChoiceItems(items.toArray(new String[0]), checked, (d, which) -> {
-                    String chosen = which == 0 ? "" : WebSession.micKey(inputs.get(which - 1));
+                    String chosen = WebSession.micKey(inputs.get(which));
                     prefs().edit().putString(PREF_WEB_MIC, chosen).apply();
                     WebSession.get().setMicChoice(chosen);
                     if (micValue != null) micValue.setText(micSummary());
@@ -726,6 +712,7 @@ public class WebSessionActivity extends Activity implements WebSession.Listener 
     }
 
     private void openPage() {
+        ensureMicChoice();
         WebSession session = WebSession.get();
         session.configure(prefs().getFloat(PREF_VOLUME, 1f), prefs().getString(PREF_WEB_MIC, ""),
                 prefs().getBoolean(PREF_WEB_AEC, true), prefs().getFloat(PREF_WEB_ZOOM, 1f),
