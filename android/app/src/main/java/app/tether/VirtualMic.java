@@ -28,6 +28,10 @@ final class VirtualMic {
         void onFrame(String base64Pcm);
 
         void onError(String message);
+
+        /** Something worth telling the user while capture goes on (e.g. the system used another input). */
+        default void onNotice(String message) {
+        }
     }
 
     private static final int RATE = 48000;
@@ -36,6 +40,7 @@ final class VirtualMic {
     private final Handler main = new Handler(Looper.getMainLooper());
     private volatile boolean running;
     private volatile boolean muted; // sends silence instead of the microphone, whatever the page does
+    private Thread thread;           // the latest capture thread; a new one waits for it, so two never overlap
     private volatile int generation; // bumped on every start/stop, so a finished thread never touches a newer capture
 
     boolean isRunning() {
@@ -46,7 +51,18 @@ final class VirtualMic {
         if (running) return;
         final int gen = ++generation;
         running = true;
-        new Thread(() -> capture(gen, device, processing, listener), "virtual-mic").start();
+        final Thread previous = thread;
+        thread = new Thread(() -> {
+            if (previous != null) {
+                try {
+                    previous.join(1500); // the old input is released before the new one opens
+                } catch (InterruptedException e) {
+                    return;
+                }
+            }
+            if (gen == generation) capture(gen, device, processing, listener);
+        }, "virtual-mic");
+        thread.start();
     }
 
     void stop() {
@@ -83,6 +99,17 @@ final class VirtualMic {
                 }
             }
             record.startRecording();
+            if (device != null) {
+                AudioDeviceInfo routed = record.getRoutedDevice();
+                if (routed != null && (routed.getType() != device.getType()
+                        || !routed.getAddress().equals(device.getAddress()))) {
+                    final String msg = "Android is recording from " + CallManager.describe(routed)
+                            + ", not the chosen " + CallManager.describe(device) + ".";
+                    main.post(() -> {
+                        if (gen == generation) listener.onNotice(msg);
+                    });
+                }
+            }
             short[] samples = new short[FRAME];
             while (gen == generation) {
                 int n = record.read(samples, 0, samples.length);
