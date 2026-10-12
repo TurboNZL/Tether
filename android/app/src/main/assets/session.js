@@ -235,6 +235,37 @@
     return out;
   }
 
+  // ---- device list: pages check it before asking for the mic ------------------------------------------
+  // A WebView may list no microphone (or only nameless, id-less entries) until the page has captured once, and
+  // web apps then say "no microphone found" without ever asking. The app picks the real input itself, so the
+  // page is always shown one usable, named microphone; its id is accepted (and ignored) when it asks for it.
+  var MIC_ID = 'default';
+  function fakeMic() {
+    var d = { deviceId: MIC_ID, kind: 'audioinput', label: 'Default microphone', groupId: 'tether-mic' };
+    d.toJSON = function () { return { deviceId: d.deviceId, kind: d.kind, label: d.label, groupId: d.groupId }; };
+    return d;
+  }
+  if (md && md.enumerateDevices) {
+    var origEnum = md.enumerateDevices.bind(md);
+    md.enumerateDevices = async function () {
+      var list = [];
+      try { list = Array.prototype.slice.call(await origEnum()); } catch (e) { /* none listed */ }
+      var usable = list.some(function (d) { return d.kind === 'audioinput' && d.deviceId; });
+      if (usable && !vm.on) return list;
+      var out = list.filter(function (d) { return d.kind !== 'audioinput' || (d.deviceId && !vm.on); });
+      out.unshift(fakeMic());
+      return out;
+    };
+  }
+  // The page's device choice means nothing here (the app or the system decides), and an id it was handed from
+  // the list above must not make the capture fail, so device ids are dropped from the audio constraints.
+  function plainAudio(a) {
+    if (!a || a === true) return a;
+    var o = Object.assign({}, a);
+    delete o.deviceId;
+    return o;
+  }
+
   if (orig) {
     md.getUserMedia = async function (c) {
       var stream;
@@ -244,12 +275,19 @@
           try { (await orig({ video: c.video })).getVideoTracks().forEach(function (t) { stream.addTrack(t); }); } catch (e) { /* audio only */ }
         }
       } else {
+        if (c && c.audio) c = Object.assign({}, c, { audio: plainAudio(c.audio) });
         if (c && c.audio && !cfg.aec) {
           var audio = c.audio === true ? {} : Object.assign({}, c.audio);
           audio.echoCancellation = false; audio.noiseSuppression = false; audio.autoGainControl = false;
           c = Object.assign({}, c, { audio: audio });
         }
-        stream = await orig(c);
+        try {
+          stream = await orig(c);
+        } catch (e) {
+          // An over-specific request (rate, channels, ...) the device cannot meet reads as "no microphone".
+          if (!(c && c.audio && e && (e.name === 'OverconstrainedError' || e.name === 'NotFoundError'))) throw e;
+          stream = await orig(Object.assign({}, c, { audio: true }));
+        }
         if (c && c.audio) stream = await processed(stream);
       }
       adopt(stream);
