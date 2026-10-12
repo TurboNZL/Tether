@@ -39,6 +39,7 @@ audio as `USAGE_MEDIA`. The in-app diagnostics show `mode`, `a2dpOn` and the inc
 - **Web session**: opens a configurable https page in an embedded browser and keeps it running with the screen off or the
   app in the background (microphone foreground service plus wake/Wi-Fi locks). The address is a setting; nothing is
   hard-coded.
+  - **Picture in picture**: the **Mini** button (and Home, on Android 12+ automatically) shrinks the page into a small floating window, hiding the controls; tap it to expand again. A visible window also makes Android much less likely to unload the app mid-call.
   - **Desktop emulation**: desktop user agent and client hints, a desktop-width layout viewport (overriding the page's own
     `width=device-width`), and desktop `navigator` properties. "Show page info" in Settings prints what the page sees.
   - **Page zoom**: a slider that lays the page out again at `1280 / zoom` CSS pixels wide, like browser zoom (everything

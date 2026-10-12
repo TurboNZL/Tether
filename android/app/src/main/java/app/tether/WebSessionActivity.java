@@ -4,9 +4,11 @@ import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.Dialog;
+import android.app.PictureInPictureParams;
 import android.app.TimePickerDialog;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.res.Configuration;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.graphics.drawable.ColorDrawable;
@@ -17,6 +19,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.util.Rational;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -56,6 +59,7 @@ public class WebSessionActivity extends Activity implements WebSession.Listener 
     private static final int LOOPBACK_SECONDS = 4;
 
     private FrameLayout holder;
+    private View[] chrome = new View[0]; // the bar, countdown and level strip: hidden in the small window
     private TextView countdown;
     private TextView muteButton;
     private LevelMeterView stripMeter;
@@ -155,6 +159,54 @@ public class WebSessionActivity extends Activity implements WebSession.Listener 
         super.onDestroy();
     }
 
+    // ---- picture in picture ----------------------------------------------------------------
+
+    private boolean canPip() {
+        return Build.VERSION.SDK_INT >= 26
+                && getPackageManager().hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE);
+    }
+
+    private PictureInPictureParams.Builder pipParams() {
+        PictureInPictureParams.Builder b = new PictureInPictureParams.Builder()
+                .setAspectRatio(new Rational(16, 9));
+        // From Android 12 the window shrinks by itself when you go Home mid-call.
+        if (Build.VERSION.SDK_INT >= 31) b.setAutoEnterEnabled(WebSession.get().isActive());
+        return b;
+    }
+
+    private void updatePip() {
+        if (!canPip()) return;
+        try {
+            setPictureInPictureParams(pipParams().build());
+        } catch (RuntimeException ignored) {
+            // Not allowed right now; the Home gesture still works through onUserLeaveHint.
+        }
+    }
+
+    /** Shrinks the page into a small floating window, which also keeps Android from unloading the app. */
+    private void enterPip() {
+        if (!canPip() || isInPictureInPictureMode() || !WebSession.get().isActive()) return;
+        if (sheet != null) sheet.dismiss();
+        try {
+            enterPictureInPictureMode(pipParams().build());
+        } catch (RuntimeException e) {
+            Toast.makeText(this, "Picture in picture is not available here.", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    @Override
+    protected void onUserLeaveHint() {
+        super.onUserLeaveHint();
+        // Android 12+ already enters by itself (auto-enter); older versions need the nudge.
+        if (Build.VERSION.SDK_INT < 31) enterPip();
+    }
+
+    @Override
+    public void onPictureInPictureModeChanged(boolean inPip, Configuration config) {
+        super.onPictureInPictureModeChanged(inPip, config);
+        for (View v : chrome) v.setVisibility(inPip ? View.GONE : View.VISIBLE);
+    }
+
     @Override
     public void onBackPressed() {
         // Never navigate the page back mid-call (that could unload it); just leave. The call keeps
@@ -194,6 +246,10 @@ public class WebSessionActivity extends Activity implements WebSession.Listener 
         TextView settings = pill("Settings", Color.WHITE);
         settings.setOnClickListener(v -> showSettings());
         bar.addView(settings, weighted(gap));
+
+        TextView pip = pill("Mini", Color.WHITE);
+        pip.setOnClickListener(v -> enterPip());
+        if (canPip()) bar.addView(pip, weighted(gap));
         root.addView(bar, new LinearLayout.LayoutParams(-1, -2));
 
         countdown = Ui.text(this, "No timer", 13f, Ui.TEXT_SECONDARY, "sans-serif-medium");
@@ -206,6 +262,7 @@ public class WebSessionActivity extends Activity implements WebSession.Listener 
         ml.setMargins(Ui.dp(this, 14), 0, Ui.dp(this, 14), Ui.dp(this, 6));
         root.addView(stripMeter, ml);
 
+        chrome = new View[]{bar, countdown, stripMeter};
         holder = new FrameLayout(this);
         root.addView(holder, new LinearLayout.LayoutParams(-1, 0, 1f));
 
@@ -265,6 +322,7 @@ public class WebSessionActivity extends Activity implements WebSession.Listener 
             if (wv.getParent() instanceof ViewGroup) ((ViewGroup) wv.getParent()).removeView(wv);
             holder.addView(wv, new FrameLayout.LayoutParams(-1, -1));
         }
+        updatePip();
     }
 
     // ---- settings sheet --------------------------------------------------------------------
